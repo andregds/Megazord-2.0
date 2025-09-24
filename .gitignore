@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.build/
+dist/
+*.log
+
+# Ambiente/IDE
+.venv/
+venv/
+env/
+.idea/
+.vscode/
+
+# Segredos & configs locais
+.env
+*.pem
+*.key
+*.pfx
+
+# Dados gerados
+*.csv
+*.parquet
+*.sqlite
+backtests/
+reports/
+
+# MT5/MQL5 (se houver)
+MQL5/Logs/
+MQL5/Profiles/Tester/Agent*/logs/
+MQL5/Files/*.log
