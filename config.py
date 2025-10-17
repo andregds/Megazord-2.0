@@ -36,8 +36,8 @@ TF_MINUTES = {"M5": 5, "M15": 15, "M30": 30, "H1": 60, "H4": 240}
 # === Consenso local ===
 MIN_PROB_CONSENSO = 60
 #PESOS_TIMEFRAMES = {"M5": 0.0, "M15": 1.5, "M30": 2.0, "H1": 2.5, "H4": 3.0}
-PESOS_TIMEFRAMES = {"M5": 1.0, "M15": 1.5, "M30": 1.5, "H1": 1.5, "H4": 0.0} # Anterior bom
-#PESOS_TIMEFRAMES = {"M5": 2.0, "M15": 0.5, "M30": 0.5, "H1": 0.5, "H4": 0.0} # A ser testado
+#PESOS_TIMEFRAMES = {"M5": 1.0, "M15": 1.5, "M30": 1.5, "H1": 1.5, "H4": 0.0} # Anterior bom
+PESOS_TIMEFRAMES = {"M5": 2.0, "M15": 0.5, "M30": 0.5, "H1": 0.5, "H4": 0.0} # A ser testado
 #anteriormente o M5 era 1.0
 MIN_SCORE_TRADE = 2.5  # só aciona sinal 'forte' se |score| >= 1.5
 

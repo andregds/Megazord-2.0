@@ -6,13 +6,11 @@ Execute:
     python main.py
 """
 
-# import autopath  # noqa: F401  # (opcional) use se precisar resolver path em IDE
-
 import os
 import time
 import json
 import pandas as pd
-from datetime import datetime, timedelta  # << adicionamos timedelta
+from datetime import datetime, timedelta
 
 from config import (
     DEEPSEEK_API_KEY,
@@ -34,7 +32,7 @@ from trader_ai import TraderAI
 # Executor de ordens baseado no score (BUY/SELL)
 from core.verdict_trader import VerdictTrader, VerdictTraderConfig
 
-# Controle: martingale + 1 posição por vez (SEM cooldown pós-loss)
+# Controle: martingale + 1 posição por vez (SEM cooldown interno do TradeControl)
 from core.trade_control import TradeControl, TradeControlConfig
 
 
@@ -120,16 +118,21 @@ class Monitor:
             symbol=self.vt.cfg.symbol
         )
 
-        # >>> Controlador de risco/fluxo (martingale + 1 posição) — SEM cooldown
+        # >>> Controlador de risco/fluxo (martingale + 1 posição) — SEM cooldown interno
         self.trade_ctl = TradeControl(TradeControlConfig(
-            symbol=self.vt.cfg.symbol,   # alinhado com o trader de veredito
-            magic=self.vt.cfg.magic,     # mesmo magic
-            base_lot=self.vt.cfg.lot,    # começa do lote atual do trader
+            symbol=self.vt.cfg.symbol,
+            magic=self.vt.cfg.magic,
+            base_lot=self.vt.cfg.lot,
             martingale_factor=3.0,
             max_lot=99.50,
             history_days=1,
             one_position_only=True,
         ))
+
+        # =====================[ COOL­DOWN PÓS-LOSS (orquestrado no main) ]=====================
+        self.cooldown_until = None       # horário (local) até quando aguarda
+        self.cooldown_armed = False      # evita rearmar cooldown para o MESMO loss
+        # =====================================================================================
 
     def dentro_do_horario(self) -> bool:
         """
@@ -150,7 +153,6 @@ class Monitor:
             return hm >= 22.0
         return False           # sábado
 
-    # 🔔 NOVO: dormir até o próximo batimento de 5 minutos do relógio local
     def _sleep_until_next_5min(self) -> None:
         """Espera até :00, :05, :10, ... do relógio do sistema."""
         now = datetime.now()
@@ -162,17 +164,12 @@ class Monitor:
         nxt = now.replace(second=0, microsecond=0) + timedelta(minutes=add_min)
         time.sleep((nxt - now).total_seconds())
 
-    # 🔒 NÃO deixa abrir posição/alerta com veredito formado por timeframes repetidos
     def _unique_by_timeframe(self, usados):
         """
         (DESABILITADO) Antes filtrava 1 item por timeframe.
         Agora apenas repassa a lista original e marca como 'já era único'.
         """
         return list(usados), True
-
-        filtrado = list(best.values())
-        ja_era_unico = (len(filtrado) == len(usados))
-        return filtrado, ja_era_unico
 
     def _log_sinal(self, r: dict, params: dict, entry: float, stop: float, target: float, atr: float) -> None:
         """Registra sinal detectado com status PENDING para avaliação futura."""
@@ -211,6 +208,19 @@ class Monitor:
                 print("⏱️ Fora do horário operacional.")
                 continue
 
+            # =====================[ GATE DO COOL­DOWN ]====================
+            if self.cooldown_until:
+                now = datetime.now()
+                if now < self.cooldown_until:
+                    restantes = int((self.cooldown_until - now).total_seconds() // 60)
+                    print(f"❄️ Em cooldown até {self.cooldown_until.strftime('%H:%M:%S')} (faltam {restantes} min).")
+                    continue  # << NÃO sai do loop: apenas aguarda o próximo batimento
+                else:
+                    print("✅ Cooldown finalizado — retomando operações automáticas.")
+                    self.cooldown_until = None
+                    # Mantemos cooldown_armed=True até uma nova operação ser executada com sucesso
+            # =============================================================
+
             # 1) Avaliar sinais pendentes e recalibrar parâmetros
             atualizados = self.tuner.avaliar_pendentes(self.mt5)
             if atualizados:
@@ -226,28 +236,23 @@ class Monitor:
                 if df.empty:
                     continue
 
-                # Indicadores com parâmetros atuais
                 df = Indicators.aplicar(df, ema_period=params["EMA_PERIOD"])
 
-                # Detecta TODOS os padrões habilitados (confirmando rompimento quando aplicável)
                 padroes = PatternDetector.detect_all(
                     df, tolerancia=params["TOLERANCIA"], params=DETECTOR_PARAMS
                 )
                 if not padroes:
                     continue
 
-                # Para cada padrão detectado, calcula prob/sinal e níveis
                 for padrao in padroes:
                     prob, sinal = Analyzer.calcular_probabilidade_por_padrao(
                         df, padrao,
                         rsi_buy=params["RSI_SOBREVENDIDO"],
                         rsi_sell=params["RSI_SOBRECOMPRA"]
                     )
-
                     entry, stop, target, atr = Analyzer.montar_trade_levels(
                         df, sinal, atr_mult=params["ATR_MULT_STOP"], rr=params["RR_MULT"]
                     )
-
                     r = {
                         "Timeframe": nome, "Padrão": padrao, "Sinal": sinal, "Probabilidade": prob,
                         "RSI": round(df["RSI"].iloc[-1], 2), "EMA": round(df["EMA"].iloc[-1], 2),
@@ -257,14 +262,11 @@ class Monitor:
                     }
                     resultados.append(r)
                     self.historico_padroes.append(padrao)
-
                     print(f"{r['Timeframe']} | {r['Padrão']} | {r['Sinal']} "
                           f"| Prob: {r['Probabilidade']}% | Entry:{r['Entry']} "
                           f"| Stop:{r['Stop']} | Target:{r['Target']}")
                     print(f"Indicadores → RSI:{r['RSI']} | EMA:{r['EMA']} | VWAP:{r['VWAP']} "
                           f"| Preço:{r['Preço']} | Vol:{r['Volume']}")
-
-                    # Loga o sinal com status PENDING (avaliado mais tarde)
                     self._log_sinal(r, params, entry, stop, target, atr)
 
             # 3) Consolida e decide
@@ -272,25 +274,20 @@ class Monitor:
                 ranking = pd.Series(self.historico_padroes).value_counts().to_dict()
                 print(f"\n📊 Ranking (sessão): {ranking}")
 
-                # Consenso local por score/pesos e min_prob
                 veredito_local, score, usados = VerdictAggregator.decidir(
                     resultados, min_prob=MIN_PROB_CONSENSO, pesos=PESOS_TIMEFRAMES
                 )
                 print(f"🧭 Veredito Local (min_prob={MIN_PROB_CONSENSO}): {veredito_local} | score={score:.1f}")
 
-                # 🔒 Regra: veredito só vale com TFs diferentes (sem repetição) — desabilitada
                 usados_unique, ja_era_unico = self._unique_by_timeframe(usados)
-
-                # Loga os itens usados
                 if usados_unique:
                     for tf, pad, sig, p, w in usados_unique:
                         print(f" - {tf}: {pad} | {sig} | {int(round(p))}% (peso {w})")
 
-                # [ANTES DO DEEPSEEK] — Notificação ao Telegram (usa lista sem repetição)
                 self.notifier.evaluate_and_notify(
                     veredito_local=veredito_local,
                     score=score,
-                    usados=usados_unique,     # << usa a lista como veio
+                    usados=usados_unique,
                     min_prob_cfg=MIN_PROB_CONSENSO,
                 )
 
@@ -299,26 +296,34 @@ class Monitor:
                     # --- SINCRONIZA ESTADO DO CONTROLE (histórico e posições)
                     self.trade_ctl.sync()
 
-                    # Regra: 1 posição por vez (SEM cooldown pós-loss)
+                    # Regra: 1 posição por vez
                     if self.trade_ctl.is_position_open():
                         print("⏸️ Já existe posição aberta — aguardando encerramento para nova entrada.")
                     else:
-                        # martingale dinâmico: ajusta lot antes de enviar
                         old_lot = float(self.vt.cfg.lot)
                         try:
-                            self.vt.cfg.lot = float(self.trade_ctl.get_next_lot())
+                            next_lot = float(self.trade_ctl.get_next_lot())
                         except Exception:
-                            self.vt.cfg.lot = old_lot
+                            next_lot = old_lot
 
+                        # === DISPARO DO COOL­DOWN: detecta LOSS (next_lot > base) e arma um único cooldown ===
+                        if (next_lot > old_lot) and (not self.cooldown_armed):
+                            self.cooldown_until = datetime.now() + timedelta(minutes=6)
+                            self.cooldown_armed = True
+                            print(f"⏸️ Loss detectado. Cooldown de 6 minutos até "
+                                  f"{self.cooldown_until.strftime('%H:%M:%S')} (hora do sistema).")
+                            continue  # volta ao topo; ao expirar, o gate libera
+
+                        # Caso contrário, opera normalmente
+                        self.vt.cfg.lot = next_lot
                         trade = self.vt.decide_and_execute(score)
-
-                        # restaura lote configurado
                         self.vt.cfg.lot = old_lot
 
                         if trade.get("ok"):
                             print(f"✅ Trade executado: {trade}")
+                            # Libera o próximo cooldown apenas após uma nova operação bem-sucedida
+                            self.cooldown_armed = False
                         else:
-                            # Normal quando o score está entre os thresholds (sem operação)
                             print(f"ℹ️  Sem execução: {trade.get('reason')}")
                 else:
                     print("⛔ Execução automática bloqueada: veredito com TFs repetidos.")
@@ -348,20 +353,9 @@ class Monitor:
             else:
                 print("Nenhum padrão detectado.")
 
-            # 👉 não há sleep aqui; o alinhamento é feito no topo do loop
+            # 👉 o alinhamento é feito no topo do loop; não dormir aqui
 
 
 if __name__ == "__main__":
     M = Monitor()
-
-    # 4.1 — conversar com o “trader”
-    resp = M.AI.chat("Qual é a resposta ? ?.")
-    print("🤖 Qual a sua atuação aqui ?:", resp.get("reply") if isinstance(resp, dict) else resp)
-
-    # 4.2 — ensinar uma regra que fica memorizada
-    M.AI.teach("Atue como um profissional trader de alta performance", tags=["risco", "tendencia"])
-
-    # 4.3 — (opcional) mandar uma ordem de teste programática
-    # M.AI.order(side="BUY", lots=0.10, entry=None, sl=2370.0, tp=2382.0, invert_flag=0)
-
     M.rodar()
