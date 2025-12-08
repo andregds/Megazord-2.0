@@ -17,7 +17,7 @@ class VerdictTraderConfig:
     #lot: float = float(os.getenv("VERDICT_LOT", "0.02"))
     lot: float = float(os.getenv("VERDICT_LOT", "0.01"))
     deviation_points: int = int(os.getenv("VERDICT_DEVIATION_PTS", "60"))
-    magic: int = int(os.getenv("VERDICT_MAGIC", "880031"))
+    magic: int = int(os.getenv("VERDICT_MAGIC", "880000"))
     comment: str = os.getenv("VERDICT_COMMENT", "VerdictTrader")
 
     # Regras de decisão pelo score
@@ -25,8 +25,8 @@ class VerdictTraderConfig:
     sell_threshold: float = float(os.getenv("VERDICT_SELL_THRESHOLD", "-2.0"))  # <= -6.0 na sua config final
 
     # Stops (em POINTS, não em preço)
-    sl_points: int = int(os.getenv("VERDICT_SL_POINTS", "4500"))
-    tp_points: int = int(os.getenv("VERDICT_TP_POINTS", "2000"))
+    sl_points: int = int(os.getenv("VERDICT_SL_POINTS", "450"))
+    tp_points: int = int(os.getenv("VERDICT_TP_POINTS", "200"))
     trail_points: int = int(os.getenv("VERDICT_TRAIL_POINTS", "0"))  # 0 desabilita
 
     # Login opcional (se terminal já está logado, deixe vazio)

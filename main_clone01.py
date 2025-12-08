@@ -131,42 +131,24 @@ class Monitor:
             one_position_only=True,
         ))
 
-    from datetime import datetime
-
     def dentro_do_horario(self) -> bool:
         """
-        Janela em America/Sao_Paulo (aprox. UTC-3, sem DST):
-          - Abre:  seg..sex às 20:00 (BR)
-          - Fecha: 06:00 do dia seguinte (BR)
-        Implementação sem dependências extras e mantendo assinatura.
+        Janela 24x5 de Forex em UTC:
+          - Abre:  domingo 22:00 UTC
+          - Fecha: sexta   22:00 UTC
+        Mon=0 .. Sun=6 (datetime.utcnow().weekday()).
         """
-        now_utc = datetime.utcnow()
-        # Converter UTC -> BR (aprox): BR = UTC-3  => hora_BR = hora_UTC - 3
-        # (equivalente a somar 21h e pegar mod 24, mas mais simples subtrair 3 horas)
-        # Como não estamos usando tz, só ajustamos horas/minutos para janela.
-        total_minutes_utc = now_utc.hour * 60 + now_utc.minute
-        total_minutes_br = (total_minutes_utc - 3 * 60) % (24 * 60)
-        hour_br = total_minutes_br // 60
-        minute_br = total_minutes_br % 60
+        now = datetime.utcnow()
+        w = now.weekday()  # Mon=0, Tue=1, Wed=2, Thu=3, Fri=4, Sat=5, Sun=6
+        hm = now.hour + now.minute / 60.0
 
-        # weekday em UTC e BR podem diferir perto da meia-noite.
-        # Ajuste o weekday para BR fazendo o mesmo deslocamento de 3 horas:
-        w_utc = now_utc.weekday()  # Mon=0 .. Sun=6
-        # Se após subtrair 3h passamos "para trás" do dia, ajusta weekday:
-        crossed_prev_day = (now_utc.hour - 3) < 0
-        w_br = (w_utc - 1) % 7 if crossed_prev_day else w_utc
-
-        hm = hour_br + minute_br / 60.0
-
-        # Noite do próprio dia (seg..sex a partir de 20:00 BR)
-        if w_br in (6,0, 1, 2, 3, 4) and hm >= 20.0:
+        if w in (0, 1, 2, 3):  # segunda a quinta
             return True
-
-        # Madrugada do dia seguinte (ter..sáb até 06:00 BR)
-        if w_br in (0, 1, 2, 3, 4, 5) and hm < 2.0:
-            return True
-
-        return False
+        if w == 4:             # sexta até 22:00 UTC
+            return hm < 22.0
+        if w == 6:             # domingo a partir de 22:00 UTC
+            return hm >= 22.0
+        return False           # sábado
 
     # 🔔 NOVO: dormir até o próximo batimento de 5 minutos do relógio local
     def _sleep_until_next_5min(self) -> None:
