@@ -1,24 +1,28 @@
 """main
-Ponto de entrada: orquestra o scanner multi-timeframe, auto-tuning, consenso local
+Ponto de entrada: orquestra o scanner multi‑timeframe, auto‑tuning, consenso local
 e veredito do DeepSeek (com fallback). Agora suporta múltiplos padrões clássicos.
 
 Execute:
     python main.py
 """
 
-# import autopath  # noqa: F401  # (opcional) use se precisar resolver path em IDE
-
+import logging
 import os
 import time
 import json
 import pandas as pd
-from datetime import datetime, timedelta  # << adicionamos timedelta
+from datetime import datetime, timedelta
 
 from config import (
     DEEPSEEK_API_KEY,
-    INTERVALO_MINUTOS, TIMEFRAMES, QTD_CANDLES,
-    MIN_PROB_CONSENSO, PESOS_TIMEFRAMES,
-    MIN_SCORE_TRADE, DETECTOR_PARAMS,
+    INTERVALO_MINUTOS,
+    TIMEFRAMES,
+    QTD_CANDLES,
+    MIN_PROB_CONSENSO,
+    PESOS_TIMEFRAMES,
+    MIN_SCORE_TRADE,
+    DETECTOR_PARAMS,
+    TOLERANCIA_PADRAO,
 )
 
 from connectors.mt5_connector import MT5Connector
@@ -31,28 +35,32 @@ from core.verdict import VerdictAggregator
 from core.signal_notifier import SignalNotifier
 from trader_ai import TraderAI
 
-# Executor de ordens baseado no score (BUY/SELL)
 from core.verdict_trader import VerdictTrader, VerdictTraderConfig
-
-# Controle: martingale + 1 posição por vez (SEM cooldown pós-loss)
 from core.trade_control import TradeControl, TradeControlConfig
-
 
 # --- Credenciais do Telegram (via ENV, com fallback) ---
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "8203615899:AAGhBysgD88tEvZdyXvI-hL6IU6WVxW7950")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "183379814")
 
-# Ponte: algumas libs leem a chave do ambiente; garantimos aqui
 os.environ.setdefault("DEEPSEEK_API_KEY", DEEPSEEK_API_KEY)
 os.environ.setdefault("TELEGRAM_TOKEN", TELEGRAM_TOKEN)
 os.environ.setdefault("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID)
 
-# Mostrar no terminal o que está sendo procurado
 print("🔧 Padrões buscados:", ", ".join(PatternDetector.listar_padroes()))
 
 
+# Configura o logger da aplicação
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+logger = logging.getLogger("Megazord")
+
 class Monitor:
-    """Loop principal: coleta dados, detecta padrões, calcula prob/sinal, loga e decide veredito."""
+    """Loop principal: coleta dados, detecta padrões, calcula prob/sinal,
+    loga e decide veredito."""
 
     def __init__(self):
         """Inicializa conectores e componentes principais."""
@@ -70,20 +78,18 @@ class Monitor:
             cooldown_sec=180,
         )
 
-        # === Execução automática pelo score (BUY/SELL) ===
+        # Execução automática pelo score (BUY/SELL)
         self.vt = VerdictTrader(VerdictTraderConfig())
         ok_conn = self.vt.connect()
         if ok_conn:
             print("[VerdictTrader] ✅ Conectado ao MT5 e símbolo preparado.")
         else:
-            print("[VerdictTrader] ❌ Falha de conexão/login no MT5. "
-                  "(Se o terminal já estiver logado manualmente, deixe MT5_LOGIN/MT5_PASSWORD/MT5_SERVER vazios.)")
+            print("[VerdictTrader] ❌ Falha de conexão/login no MT5.")
 
-        # ---------- Adaptador de envio de ordens p/ o TraderAI (opcional) ----------
+        # Adaptador de envio de ordens para o TraderAI
         def _ai_send_order_wrapper(trader, side, px_now, entry, sl, tp, lots=None, near_pct=0.0001):
             try:
                 lots = lots or 0.01
-                # MARKET se entry muito perto do preço atual
                 if max(px_now, 1) > 0 and entry is not None and abs(entry - px_now) / px_now < float(near_pct):
                     fn = getattr(self.mt5, "market_order", None) or getattr(self.mt5, "enviar_ordem_market", None)
                     if callable(fn):
@@ -91,7 +97,6 @@ class Monitor:
                     print(f"[SIM] MARKET {side} lots={lots} sl={sl} tp={tp}")
                     return {"status": "simulado", "type": "MARKET", "side": side, "lots": lots, "sl": sl, "tp": tp}
 
-                # Decide tipo da pendente
                 if side.upper() == "BUY":
                     kind = "BUY_LIMIT" if entry < px_now else "BUY_STOP"
                 else:
@@ -109,10 +114,10 @@ class Monitor:
             except Exception as e:
                 print("[AI order wrapper] erro:", e)
                 return {"status": "erro", "err": str(e)}
-        self._ai_send_order_wrapper = _ai_send_order_wrapper
-        # ----------------------------------------------------------------
 
-        # Copiloto AI (chat/teach/order textual – opcional)
+        self._ai_send_order_wrapper = _ai_send_order_wrapper
+
+        # Copiloto AI (opcional)
         self.AI = TraderAI(
             trader=self.mt5,
             send_order_fn=self._ai_send_order_wrapper,
@@ -120,57 +125,33 @@ class Monitor:
             symbol=self.vt.cfg.symbol
         )
 
-        # >>> Controlador de risco/fluxo (martingale + 1 posição) — SEM cooldown
+        # Controlador de risco/fluxo
         self.trade_ctl = TradeControl(TradeControlConfig(
-            symbol=self.vt.cfg.symbol,   # alinhado com o trader de veredito
-            magic=self.vt.cfg.magic,     # mesmo magic
-            base_lot=self.vt.cfg.lot,    # começa do lote atual do trader
+            symbol=self.vt.cfg.symbol,
+            magic=self.vt.cfg.magic,
+            base_lot=self.vt.cfg.lot,
             martingale_factor=3.0,
             max_lot=99.50,
             history_days=1,
             one_position_only=True,
         ))
 
-    from datetime import datetime
-
     def dentro_do_horario(self) -> bool:
-        """
-        Janela em America/Sao_Paulo (aprox. UTC-3, sem DST):
-          - Abre:  seg..sex às 20:00 (BR)
-          - Fecha: 06:00 do dia seguinte (BR)
-        Implementação sem dependências extras e mantendo assinatura.
-        """
-        now_utc = datetime.utcnow()
-        # Converter UTC -> BR (aprox): BR = UTC-3  => hora_BR = hora_UTC - 3
-        # (equivalente a somar 21h e pegar mod 24, mas mais simples subtrair 3 horas)
-        # Como não estamos usando tz, só ajustamos horas/minutos para janela.
-        total_minutes_utc = now_utc.hour * 60 + now_utc.minute
-        total_minutes_br = (total_minutes_utc - 3 * 60) % (24 * 60)
-        hour_br = total_minutes_br // 60
-        minute_br = total_minutes_br % 60
+        """Verifica se está dentro do horário operacional."""
+        now = datetime.utcnow()
+        w = now.weekday()
+        hm = now.hour + now.minute / 60.0
 
-        # weekday em UTC e BR podem diferir perto da meia-noite.
-        # Ajuste o weekday para BR fazendo o mesmo deslocamento de 3 horas:
-        w_utc = now_utc.weekday()  # Mon=0 .. Sun=6
-        # Se após subtrair 3h passamos "para trás" do dia, ajusta weekday:
-        crossed_prev_day = (now_utc.hour - 3) < 0
-        w_br = (w_utc - 1) % 7 if crossed_prev_day else w_utc
-
-        hm = hour_br + minute_br / 60.0
-
-        # Noite do próprio dia (seg..sex a partir de 20:00 BR)
-        if w_br in (6,0, 1, 2, 3, 4) and hm >= 20.0:
+        if w in (0, 1, 2, 3):
             return True
-
-        # Madrugada do dia seguinte (ter..sáb até 06:00 BR)
-        if w_br in (0, 1, 2, 3, 4, 5) and hm < 2.0:
-            return True
-
+        if w == 4:
+            return hm < 22.0
+        if w == 6:
+            return hm >= 22.0
         return False
 
-    # 🔔 NOVO: dormir até o próximo batimento de 5 minutos do relógio local
     def _sleep_until_next_5min(self) -> None:
-        """Espera até :00, :05, :10, ... do relógio do sistema."""
+        """Espera até o próximo batimento de 5 minutos do relógio local."""
         now = datetime.now()
         add_min = (5 - (now.minute % 5)) % 5
         if add_min == 0 and now.second == 0 and now.microsecond == 0:
@@ -180,39 +161,38 @@ class Monitor:
         nxt = now.replace(second=0, microsecond=0) + timedelta(minutes=add_min)
         time.sleep((nxt - now).total_seconds())
 
-    # 🔒 NÃO deixa abrir posição/alerta com veredito formado por timeframes repetidos
     def _unique_by_timeframe(self, usados):
-        """
-        (DESABILITADO) Antes filtrava 1 item por timeframe.
-        Agora apenas repassa a lista original e marca como 'já era único'.
-        """
-        return list(usados), True
-
-        filtrado = list(best.values())
-        ja_era_unico = (len(filtrado) == len(usados))
+        """Filtra sinais únicos por timeframe."""
+        filtrado = []
+        ja_era_unico = True
+        for item in usados:
+            if item not in filtrado:
+                filtrado.append(item)
+            else:
+                ja_era_unico = False
         return filtrado, ja_era_unico
 
     def _log_sinal(self, r: dict, params: dict, entry: float, stop: float, target: float, atr: float) -> None:
         """Registra sinal detectado com status PENDING para avaliação futura."""
         registro = {
             "detect_time": datetime.utcnow(),
-            "timeframe":   r["Timeframe"],
-            "pattern":     r["Padrão"],
-            "signal":      r["Sinal"],
-            "prob":        r["Probabilidade"],
-            "rsi":         r["RSI"],
-            "ema":         r["EMA"],
-            "vwap":        r["VWAP"],
-            "price":       r["Preço"],
-            "volume":      r["Volume"],
-            "entry":       r["Entry"],
-            "stop":        r["Stop"],
-            "target":      r["Target"],
-            "atr":         atr,
-            "rr":          params["RR_MULT"],
-            "status":      "PENDING",
+            "timeframe": r["Timeframe"],
+            "pattern": r["Padrão"],
+            "signal": r["Sinal"],
+            "prob": r["Probabilidade"],
+            "rsi": r["RSI"],
+            "ema": r["EMA"],
+            "vwap": r["VWAP"],
+            "price": r["Preço"],
+            "volume": r["Volume"],
+            "entry": r["Entry"],
+            "stop": r["Stop"],
+            "target": r["Target"],
+            "atr": atr,
+            "rr": params["RR_MULT"],
+            "status": "PENDING",
             "evaluated_at": None,
-            "params":      json.dumps(params),
+            "params": json.dumps(params),
         }
         self.tuner.salvar_sinal(registro)
 
@@ -221,15 +201,12 @@ class Monitor:
         self.mt5.conectar()
 
         while True:
-            # 0) Alinha ao relógio do sistema (próximo :00/:05/:10/…)
             self._sleep_until_next_5min()
 
-            # 0.1) Janela operacional — se fechado, apenas pula para o próximo batimento
             if not self.dentro_do_horario():
                 print("⏱️ Fora do horário operacional.")
                 continue
 
-            # 1) Avaliar sinais pendentes e recalibrar parâmetros
             atualizados = self.tuner.avaliar_pendentes(self.mt5)
             if atualizados:
                 print(f"📝 Avaliados {atualizados} sinais pendentes.")
@@ -238,32 +215,24 @@ class Monitor:
             print(f"\n🔎 {datetime.utcnow()} → Scanner Multi-Timeframe | Params: {params}")
             resultados = []
 
-            # 2) Varrida por timeframe com múltiplos padrões
             for nome, tf in TIMEFRAMES.items():
                 df = self.mt5.obter_candles(tf, QTD_CANDLES)
                 if df.empty:
                     continue
 
-                # Indicadores com parâmetros atuais
                 df = Indicators.aplicar(df, ema_period=params["EMA_PERIOD"])
-
-                # Detecta TODOS os padrões habilitados (confirmando rompimento quando aplicável)
-                padroes = PatternDetector.detect_all(
-                    df, tolerancia=params["TOLERANCIA"], params=DETECTOR_PARAMS
-                )
+                padroes = PatternDetector.detect_all(df, tolerancia=params["TOLERANCIA"], params=DETECTOR_PARAMS)
                 if not padroes:
                     continue
 
-                # Para cada padrão detectado, calcula prob/sinal e níveis
                 for padrao in padroes:
-                    prob, sinal = Analyzer.calcular_probabilidade_por_padrao(
-                        df, padrao,
+                    prob, sinal = Analyzer.calcular_probabilidade_por_padrao(df, padrao,
                         rsi_buy=params["RSI_SOBREVENDIDO"],
-                        rsi_sell=params["RSI_SOBRECOMPRA"]
+                        rsi_sell=params["RSI_SOBRECOMPRA"],
                     )
 
-                    entry, stop, target, atr = Analyzer.montar_trade_levels(
-                        df, sinal, atr_mult=params["ATR_MULT_STOP"], rr=params["RR_MULT"]
+                    entry, stop, target, atr = Analyzer.montar_trade_levels(df, sinal,
+                        atr_mult=params["ATR_MULT_STOP"], rr=params["RR_MULT"]
                     )
 
                     r = {
@@ -276,95 +245,95 @@ class Monitor:
                     resultados.append(r)
                     self.historico_padroes.append(padrao)
 
-                    print(f"{r['Timeframe']} | {r['Padrão']} | {r['Sinal']} "
-                          f"| Prob: {r['Probabilidade']}% | Entry:{r['Entry']} "
-                          f"| Stop:{r['Stop']} | Target:{r['Target']}")
-                    print(f"Indicadores → RSI:{r['RSI']} | EMA:{r['EMA']} | VWAP:{r['VWAP']} "
-                          f"| Preço:{r['Preço']} | Vol:{r['Volume']}")
+                    print(f"{r['Timeframe']} | {r['Padrão']} | {r['Sinal']} | Prob: {r['Probabilidade']}% | Entry:{r['Entry']} | Stop:{r['Stop']} | Target:{r['Target']}")
+                    print(f"Indicadores → RSI:{r['RSI']} | EMA:{r['EMA']} | VWAP:{r['VWAP']} | Preço:{r['Preço']} | Vol:{r['Volume']}")
 
-                    # Loga o sinal com status PENDING (avaliado mais tarde)
                     self._log_sinal(r, params, entry, stop, target, atr)
 
-            # 3) Consolida e decide
             if resultados:
                 ranking = pd.Series(self.historico_padroes).value_counts().to_dict()
                 print(f"\n📊 Ranking (sessão): {ranking}")
 
-                # Consenso local por score/pesos e min_prob
-                veredito_local, score, usados = VerdictAggregator.decidir(
-                    resultados, min_prob=MIN_PROB_CONSENSO, pesos=PESOS_TIMEFRAMES
+                veredito_local, score, usados = VerdictAggregator.decidir(resultados,
+                    min_prob=MIN_PROB_CONSENSO, pesos=PESOS_TIMEFRAMES
                 )
                 print(f"🧭 Veredito Local (min_prob={MIN_PROB_CONSENSO}): {veredito_local} | score={score:.1f}")
 
-                # 🔒 Regra: veredito só vale com TFs diferentes (sem repetição) — desabilitada
                 usados_unique, ja_era_unico = self._unique_by_timeframe(usados)
 
-                # Loga os itens usados
                 if usados_unique:
                     for tf, pad, sig, p, w in usados_unique:
                         print(f" - {tf}: {pad} | {sig} | {int(round(p))}% (peso {w})")
 
-                # [ANTES DO DEEPSEEK] — Notificação ao Telegram (usa lista sem repetição)
                 self.notifier.evaluate_and_notify(
                     veredito_local=veredito_local,
                     score=score,
-                    usados=usados_unique,     # << usa a lista como veio
+                    usados=usados_unique,
                     min_prob_cfg=MIN_PROB_CONSENSO,
                 )
 
-                # >>> EXECUÇÃO DE ORDEM PELO SCORE
                 if ja_era_unico:
-                    # --- SINCRONIZA ESTADO DO CONTROLE (histórico e posições)
                     self.trade_ctl.sync()
 
-                    # Regra: 1 posição por vez (SEM cooldown pós-loss)
                     if self.trade_ctl.is_position_open():
                         print("⏸️ Já existe posição aberta — aguardando encerramento para nova entrada.")
                     else:
-                        # martingale dinâmico: ajusta lot antes de enviar
                         old_lot = float(self.vt.cfg.lot)
                         try:
                             self.vt.cfg.lot = float(self.trade_ctl.get_next_lot())
                         except Exception:
                             self.vt.cfg.lot = old_lot
 
-                        trade = self.vt.decide_and_execute(score)
+                        resumo = "Análise técnica XAU/USD:\n"
+                        for r in resultados:
+                            resumo += (f"{r['Timeframe']} → {r['Padrão']} | {r['Sinal']} | "
+                                       f"Prob:{r['Probabilidade']}% | RSI:{r['RSI']} | EMA:{r['EMA']} | "
+                                       f"VWAP:{r['VWAP']} | Preço:{r['Preço']} | Entry:{r['Entry']} | "
+                                       f"Stop:{r['Stop']} | Target:{r['Target']}\n")
+                        resumo += f"Parâmetros atuais: {params}\nPadrões mais frequentes: {ranking}\n"
 
-                        # restaura lote configurado
-                        self.vt.cfg.lot = old_lot
+                        veredito = self.deepseek.analisar(resumo, retries=2, timeout=30, backoff=4)
+                        if isinstance(veredito, str) and veredito.startswith("Erro DeepSeek"):
+                            print(f"\n🤖 DeepSeek ERRO → {veredito}")
+                            print(f"Fallback (veredito local) → {veredito_local}")
 
-                        if trade.get("ok"):
-                            print(f"✅ Trade executado: {trade}")
                         else:
-                            # Normal quando o score está entre os thresholds (sem operação)
-                            print(f"ℹ️  Sem execução: {trade.get('reason')}")
+                            print(f"\n🤖 DeepSeek Veredito Final: {veredito}")
+
+                            side_to_trade = None
+                            if "COMPRA" in veredito.upper():
+                                side_to_trade = "BUY"
+
+                            elif "VENDA" in veredito.upper():
+                                side_to_trade = "SELL"
+                                logger.info(f"Motivo da decisão do DeepSeek: {veredito}")
+
+                            if side_to_trade:
+                                if self.trade_ctl.is_position_open():
+                                    print("⏸️ Já existe posição aberta — decisão DeepSeek ignorada.")
+                                else:
+                                    price_now = self.vt._price_now(side_to_trade)
+                                    if price_now is None:
+                                        print("⚠️ Não foi possível obter preço atual – ordem não enviada.")
+                                    else:
+                                        sl, tp = self.deepseek.calcular_sl_tp(price_now)
+                                        order_res = self.vt._order_send_market(side_to_trade, price_now, sl, tp)
+
+                                        if order_res.get("ok"):
+                                            print(f"✅ Ordem {side_to_trade} enviada por decisão DeepSeek:")
+                                            print(f"    preço  = {price_now:.5f}")
+                                            print(f"    SL     = {sl:.5f}")
+                                            print(f"    TP     = {tp:.5f}")
+                                            print(f"    ticket = {order_res.get('result').order if order_res.get('result') else 'N/A'}")
+                                        else:
+                                            print(f"❌ Falha ao enviar ordem {side_to_trade} por decisão DeepSeek:")
+                                            print(f"    detalhe = {order_res}")
+                            else:
+                                print(f"\n🤖 DeepSeek Veredito Final (sem ação): {veredito}")
+
+
                 else:
-                    print("⛔ Execução automática bloqueada: veredito com TFs repetidos.")
-
-                # (opcional) trailing stop nas posições abertas (se trail_points > 0)
-                self.vt.manage_trailing()
-
-                # Gate opcional por força mínima do consenso (apenas log)
-                if abs(score) < MIN_SCORE_TRADE:
-                    print(f"⚠️ Score insuficiente ({score:.1f} < {MIN_SCORE_TRADE}). Aguardar confirmação.")
-
-                # Resumo para IA (DeepSeek)
-                resumo = "Análise técnica XAU/USD:\n"
-                for r in resultados:
-                    resumo += (f"{r['Timeframe']} → {r['Padrão']} | {r['Sinal']} | Prob:{r['Probabilidade']}% | "
-                               f"RSI:{r['RSI']} | EMA:{r['EMA']} | VWAP:{r['VWAP']} | Preço:{r['Preço']} | "
-                               f"Entry:{r['Entry']} | Stop:{r['Stop']} | Target:{r['Target']}\n")
-                resumo += f"Parâmetros atuais: {params}\nPadrões mais frequentes: {ranking}\n"
-                resumo += f"Veredito Local: {veredito_local} (score={score:.1f})"
-
-                veredito = self.deepseek.analisar(resumo, retries=2, timeout=30, backoff=4)
-                if isinstance(veredito, str) and veredito.startswith("Erro DeepSeek"):
-                    print(f"\n🤖 DeepSeek ERRO → {veredito}")
-                    print(f"Fallback (veredito local) → {veredito_local}")
-                else:
-                    print(f"\n🤖 DeepSeek Veredito Final: {veredito}")
-            else:
-                print("Nenhum padrão detectado.")
+                    print("Nenhum padrão detectado.")
 
             # 👉 não há sleep aqui; o alinhamento é feito no topo do loop
 
@@ -372,14 +341,7 @@ class Monitor:
 if __name__ == "__main__":
     M = Monitor()
 
-    # 4.1 — conversar com o “trader”
     resp = M.AI.chat("Qual é a resposta ? ?.")
     print("🤖 Qual a sua atuação aqui ?:", resp.get("reply") if isinstance(resp, dict) else resp)
-
-    # 4.2 — ensinar uma regra que fica memorizada
-    M.AI.teach("Atue como um profissional trader de alta performance", tags=["risco", "tendencia"])
-
-    # 4.3 — (opcional) mandar uma ordem de teste programática
-    # M.AI.order(side="BUY", lots=0.10, entry=None, sl=2370.0, tp=2382.0, invert_flag=0)
 
     M.rodar()
