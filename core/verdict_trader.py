@@ -1,9 +1,22 @@
+# FILE NAME: core/verdict_trader.py
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Literal, Dict, Any
 from datetime import datetime
 import os
 import MetaTrader5 as mt5
+import logging
+import pandas as pd
+from core.indicators import Indicators # Importação confirmada
+
+# Configura o logger da aplicação (se já não estiver configurado em main.py)
+logger = logging.getLogger("Megazord")
+if not logger.handlers: # Configura apenas se não houver handlers, para evitar duplicação
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)-8s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
 
 Side = Literal["BUY", "SELL"]
 
@@ -15,143 +28,215 @@ class VerdictTraderConfig:
     deviation_points: int = int(os.getenv("VERDICT_DEVIATION_PTS", "60"))
     magic: int = int(os.getenv("VERDICT_MAGIC", "880031"))
     comment: str = os.getenv("VERDICT_COMMENT", "VerdictTrader")
+
     # Regras de decisão pelo score
     buy_threshold: float = float(os.getenv("VERDICT_BUY_THRESHOLD", "2.0"))
     sell_threshold: float = float(os.getenv("VERDICT_SELL_THRESHOLD", "-2.0"))
-    # Stops (em POINTS, não em preço)
-    sl_points: int = int(os.getenv("VERDICT_SL_POINTS", "4500"))
-    tp_points: int = int(os.getenv("VERDICT_TP_POINTS", "2000"))
-    trail_points: int = int(os.getenv("VERDICT_TRAIL_POINTS", "0"))  # 0 desabilita
-    # Login opcional (se terminal já está logado, deixe vazio)
-    login: Optional[int] = (int(os.getenv("MT5_LOGIN")) if os.getenv("MT5_LOGIN", "").isdigit() else None)
-    password: Optional[str] = (os.getenv("MT5_PASSWORD") or None)
-    server: Optional[str] = (os.getenv("MT5_SERVER") or None)
-    # Caminho opcional do terminal (mt5.initialize(path))
-    terminal_path: Optional[str] = (os.getenv("MT5_TERMINAL_PATH") or None)
-    # Modos de preenchimento/tempo
-    type_filling: int = int(os.getenv("VERDICT_TYPE_FILLING", str(mt5.ORDER_FILLING_FOK)))
-    type_time: int = int(os.getenv("VERDICT_TYPE_TIME", str(mt5.ORDER_TIME_GTC)))
-    # Política de “apenas 1 operação por vez”
-    single_pos_scope: str = os.getenv("VERDICT_SINGLE_POS_SCOPE", "symbol").lower()
+
+    # Parâmetros para cálculo de SL/TP (se não vierem da IA)
+    atr_period: int = int(os.getenv("VERDICT_ATR_PERIOD", "14"))
+    atr_multiplier_sl: float = float(os.getenv("VERDICT_ATR_MULTIPLIER_SL", "1.5"))
+    atr_multiplier_tp: float = float(os.getenv("VERDICT_ATR_MULTIPLIER_TP", "3.0"))
+
+    # Parâmetros para validação local
+    rsi_period: int = int(os.getenv("VERDICT_RSI_PERIOD", "14"))
+    rsi_overbought: int = int(os.getenv("VERDICT_RSI_OVERBOUGHT", "70"))
+    rsi_oversold: int = int(os.getenv("VERDICT_RSI_OVERSOLD", "30"))
+    ema_period: int = int(os.getenv("VERDICT_EMA_PERIOD", "21"))
 
 class VerdictTrader:
-    """
-    - Conecta ao MT5 (initialize + login opcional)
-    - Decide o lado pelo 'score' e envia ordem MARKET com SL/TP em points
-    - Suporte a trailing stop (chamar manage_trailing() no seu loop)
-    - Garante apenas 1 operação por vez, conforme single_pos_scope
-    """
+    def __init__(self, config: VerdictTraderConfig):
+        self.cfg = config
+        self.symbol_info = None
+        self.point = 0.0
+        self.mt5_connected = False
 
-    def __init__(self, cfg: VerdictTraderConfig):
-        self.cfg = cfg
-        self._si = None  # cache de symbol_info
-
-    # ---------- Conexão ----------
     def connect(self) -> bool:
-        ok_init = mt5.initialize(self.cfg.terminal_path) if self.cfg.terminal_path else mt5.initialize()
-        if not ok_init:
-            print(f"[VerdictTrader] MT5.initialize() falhou: {mt5.last_error()}")
+        if not mt5.initialize():
+            logger.error(f"Falha ao inicializar MT5: {mt5.last_error()}")
             return False
-        if self.cfg.login and self.cfg.password and self.cfg.server:
-            if not mt5.login(self.cfg.login, password=self.cfg.password, server=self.cfg.server):
-                print(f"[VerdictTrader] MT5.login() falhou: {mt5.last_error()}")
+
+        # Conectar à conta (se credenciais forem fornecidas)
+        mt5_login = os.getenv("MT5_LOGIN")
+        mt5_password = os.getenv("MT5_PASSWORD")
+        mt5_server = os.getenv("MT5_SERVER")
+
+        if mt5_login and mt5_password and mt5_server:
+            login = int(mt5_login)
+            if not mt5.login(login, password=mt5_password, server=mt5_server):
+                logger.error(f"Falha ao conectar à conta MT5 {login} no servidor {mt5_server}: {mt5.last_error()}")
+                mt5.shutdown()
                 return False
-        if not mt5.symbol_select(self.cfg.symbol, True):
-            print(f"[VerdictTrader] symbol_select({self.cfg.symbol}) falhou.")
+            logger.info(f"✅ Conectado ao MetaTrader5 na conta {login}.")
+        else:
+            logger.info("✅ MetaTrader5 inicializado (sem login explícito, usando conta padrão).")
+
+        # Obter informações do símbolo
+        self.symbol_info = mt5.symbol_info(self.cfg.symbol)
+        if self.symbol_info is None:
+            logger.error(f"Falha ao obter informações do símbolo {self.cfg.symbol}")
+            mt5.shutdown()
             return False
-        self._si = mt5.symbol_info(self.cfg.symbol)
-        if not self._si or self._si.point <= 0:
-            print(f"[VerdictTrader] symbol_info inválido para {self.cfg.symbol}.")
-            return False
+
+        if not self.symbol_info.visible:
+            if not mt5.symbol_select(self.cfg.symbol, True):
+                logger.error(f"Falha ao selecionar o símbolo {self.cfg.symbol}")
+                mt5.shutdown()
+                return False
+
+        self.point = self.symbol_info.point
+        logger.info(f"✅ Símbolo {self.cfg.symbol} selecionado e informações obtidas. Point: {self.point}")
+        self.mt5_connected = True
         return True
 
-    # ---------- Preço Atual ----------
-    def _tick(self):
-        """Obtém informações do símbolo, incluindo preços de compra e venda."""
-        return mt5.symbol_info_tick(self.cfg.symbol)
-
-    def _price_now(self, side: Side) -> Optional[float]:
-        """Obtém o preço atual (ask para BUY, bid para SELL)."""
-        t = self._tick()
-        if not t:
+    def _get_current_price(self, side: Side) -> Optional[float]:
+        """Obtém o preço atual (bid para SELL, ask para BUY)."""
+        if not self.mt5_connected:
+            logger.error("MT5 não conectado. Não é possível obter o preço atual.")
             return None
-        return float(t.ask if side == "BUY" else t.bid)
-
-    # ---------- Decisão pelo score ----------
-    def decide_side(self, score: float) -> Optional[Side]:
-        if score is None:
+        symbol_info_tick = mt5.symbol_info_tick(self.cfg.symbol)
+        if symbol_info_tick is None:
+            logger.error(f"Falha ao obter tick para {self.cfg.symbol}: {mt5.last_error()}")
             return None
-        if score >= self.cfg.buy_threshold:
-            return "BUY"
-        elif score <= self.cfg.sell_threshold:
-            return "SELL"
+        if side == "BUY":
+            return symbol_info_tick.ask
+        elif side == "SELL":
+            return symbol_info_tick.bid
         return None
 
-    # ---------- Envio de ordem ----------
-    def _order_send_market(self, side: Side, px: float, sl: float, tp: float) -> Dict[str, Any]:
-        req = {
+    # Renomeado para _price_now para consistência com a discussão anterior
+    _price_now = _get_current_price
+
+    def validar_decisao_local(self, side: Side, price: float) -> None:
+        """
+        Valida a decisão de trade (BUY/SELL) contra indicadores técnicos locais (RSI, EMA).
+        Esta função apenas loga alertas, não bloqueia a execução da ordem.
+        """
+        if not self.mt5_connected:
+            logger.warning("MT5 não conectado. Validação local de decisão não pode ser realizada.")
+            return
+
+        # Obter os últimos candles para cálculo dos indicadores
+        # Usamos um timeframe menor (M5) para validação rápida, ou o menor timeframe configurado
+        # Assumindo que o MT5Connector tem um método para obter candles para um timeframe específico
+        # Para esta validação, 100 candles devem ser suficientes para RSI e EMA
+        candles = mt5.copy_rates_from_pos(self.cfg.symbol, mt5.TIMEFRAME_M5, 0, 100)
+        if candles is None or len(candles) == 0:
+            logger.warning("Não foi possível obter candles para validação local. Validação ignorada.")
+            return
+
+        df = pd.DataFrame(candles)
+        df['time'] = pd.to_datetime(df['time'], unit='s')
+        df.set_index('time', inplace=True)
+
+        # Aplicar indicadores usando o método 'aplicar' da classe Indicators
+        # Passamos os períodos configurados para RSI e EMA
+        df = Indicators.aplicar(df, rsi_period=self.cfg.rsi_period, ema_period=self.cfg.ema_period)
+
+        # Verificar se as colunas 'RSI' e 'EMA' foram adicionadas e não estão vazias
+        if 'RSI' in df.columns and not df['RSI'].empty:
+            current_rsi = df['RSI'].iloc[-1]
+            if side == "BUY" and current_rsi > self.cfg.rsi_overbought:
+                logger.warning(
+                    f"⚠️ Validação Local: Decisão de COMPRA com RSI ({current_rsi:.2f}) em sobrecompra (> {self.cfg.rsi_overbought})."
+                )
+            elif side == "SELL" and current_rsi < self.cfg.rsi_oversold:
+                logger.warning(
+                    f"⚠️ Validação Local: Decisão de VENDA com RSI ({current_rsi:.2f}) em sobrevenda (< {self.cfg.rsi_oversold})."
+                )
+        else:
+            logger.warning("⚠️ Validação Local: RSI não calculado ou coluna 'RSI' ausente após aplicar indicadores.")
+
+        if 'EMA' in df.columns and not df['EMA'].empty:
+            current_ema = df['EMA'].iloc[-1]
+            if side == "BUY" and price < current_ema:
+                logger.warning(
+                    f"⚠️ Validação Local: Decisão de COMPRA com preço ({price:.5f}) abaixo da EMA ({current_ema:.5f})."
+                )
+            elif side == "SELL" and price > current_ema:
+                logger.warning(
+                    f"⚠️ Validação Local: Decisão de VENDA com preço ({price:.5f}) acima da EMA ({current_ema:.5f})."
+                )
+        else:
+            logger.warning("⚠️ Validação Local: EMA não calculado ou coluna 'EMA' ausente após aplicar indicadores.")
+
+
+    def _order_send_market(self, side: Side, price: float, sl: float, tp: float) -> Dict[str, Any]:
+        """Envia uma ordem a mercado com SL e TP."""
+        if not self.mt5_connected:
+            logger.error("MT5 não conectado. Ordem não enviada.")
+            return {"ok": False, "comment": "MT5 not connected"}
+
+        # Validação local da decisão (apenas para logar alertas, não bloqueia)
+        self.validar_decisao_local(side, price) # Chama para logar alertas, mas não bloqueia
+
+        # Prepara a requisição
+        request = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": self.cfg.symbol,
-            "volume": float(self.cfg.lot),
-            "type": 0 if side == "BUY" else 1,
-            "price": float(px),
-            "sl": float(sl),
-            "tp": float(tp),
-            "deviation": int(self.cfg.deviation_points),
-            "magic": int(self.cfg.magic),
-            "comment": str(self.cfg.comment),
-            "type_filling": int(self.cfg.type_filling),
-            "type_time": int(self.cfg.type_time),
+            "volume": self.cfg.lot,
+            "type": mt5.ORDER_TYPE_BUY if side == "BUY" else mt5.ORDER_TYPE_SELL,
+            "price": price,
+            "deviation": self.cfg.deviation_points,
+            "sl": sl,
+            "tp": tp,
+            "magic": self.cfg.magic,
+            "comment": self.cfg.comment,
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
         }
-        res = mt5.order_send(req)
-        if res is None:
-            return {"ok": False, "err": mt5.last_error(), "request": req}
-        ok = (res.retcode == mt5.TRADE_RETCODE_DONE)
-        return {"ok": ok, "retcode": res.retcode, "result": res, "request": req}
+        result = mt5.order_send(request)
+        if result.retcode == mt5.TRADE_RETCODE_DONE:
+            logger.info(f"Ordem {side} enviada com sucesso. Ticket: {result.order}")
+            return {"ok": True, "result": result}
+        else:
+            logger.error(f"Falha ao enviar ordem {side}: {result.comment} (Retcode: {result.retcode})")
+            return {"ok": False, "retcode": result.retcode, "comment": result.comment}
 
-    # ---------- Trailing opcional ----------
-    def manage_trailing(self) -> None:
-        if self.cfg.trail_points <= 0:
+    def manage_trailing(self, side: str, price: float, trail_distance: float):
+        """
+        Gerencia o trailing stop para posições abertas.
+        Ajusta o SL para proteger lucros, mantendo o TP original.
+        """
+        if not self.mt5_connected:
+            logger.error("MT5 não conectado. Trailing stop não gerenciado.")
             return
-        pt = self._point()
-        trail_dist = self.cfg.trail_points * pt
-        t = self._tick()
-        if not t:
+        positions = mt5.positions_get(symbol=self.cfg.symbol)
+        if positions is None:
+            logger.error(f"Falha ao obter posições para {self.cfg.symbol}: {mt5.last_error()}")
             return
-        # Para BUY usa BID; para SELL usa ASK
-        price_now_buy = float(t.bid)
-        price_now_sell = float(t.ask)
-        poss = mt5.positions_get(symbol=self.cfg.symbol)
-        if not poss:
-            return
-        for p in poss:
+        for p in positions:
             if p.magic != self.cfg.magic:
-                continue
-            side = "BUY" if p.type == mt5.POSITION_TYPE_BUY else "SELL"
-            sl_old = float(p.sl) if p.sl else 0.0
-            tp_old = float(p.tp) if p.tp else 0.0
-            new_sl = None
-            if side == "BUY":
-                target_sl = price_now_buy - trail_dist
-                if target_sl > 0 and (sl_old == 0.0 or target_sl > sl_old):
-                    new_sl = self._round(target_sl)
-            else:
-                target_sl = price_now_sell + trail_dist
-                if sl_old == 0.0 or target_sl < sl_old:
-                    new_sl = self._round(target_sl)
-            if new_sl is None:
-                continue
-            req = {
-                "action": mt5.TRADE_ACTION_SLTP,
-                "position": p.ticket,
-                "symbol": self.cfg.symbol,
-                "sl": float(new_sl),
-                "tp": float(tp_old),
-                "magic": int(self.cfg.magic),
-                "comment": f"{self.cfg.comment}-trail",
-            }
-            res = mt5.order_send(req)
-            if res and res.retcode == mt5.TRADE_RETCODE_DONE:
-                print(f"[VerdictTrader] Trailing {side}: SL {sl_old} → {new_sl} (ticket {p.ticket})")
-            else:
-                print(f"[VerdictTrader] Falha trailing (ticket {p.ticket}):", res if res else mt5.last_error())
+                continue # Ignora posições de outros robôs/operações
+            # Garante que estamos gerenciando a posição correta (BUY/SELL)
+            if (side == "BUY" and p.type == mt5.ORDER_TYPE_BUY) or \
+               (side == "SELL" and p.type == mt5.ORDER_TYPE_SELL):
+                # Calcula o novo SL
+                new_sl = p.sl # Começa com o SL atual
+                if side == "BUY":
+                    # Se o preço atual subiu o suficiente para mover o SL
+                    if price - trail_distance > p.sl:
+                        new_sl = price - trail_distance
+                else: # SELL
+                    # Se o preço atual caiu o suficiente para mover o SL
+                    if price + trail_distance < p.sl or p.sl == 0.0: # Considera SL=0 como não definido
+                        new_sl = price + trail_distance
+                # Arredonda o novo SL para o número de dígitos do símbolo
+                new_sl = round(new_sl, self.symbol_info.digits)
+                # Se o novo SL for diferente do SL atual e for mais favorável (protegendo mais lucro)
+                if new_sl != p.sl and \
+                   ((side == "BUY" and new_sl > p.sl) or (side == "SELL" and new_sl < p.sl)):
+                    # Prepara a requisição de modificação
+                    req = {
+                        "action": mt5.TRADE_ACTION_SLTP,
+                        "position": p.ticket,
+                        "sl": float(new_sl),
+                        "tp": float(p.tp), # Mantém o TP original definido pela IA
+                        "magic": int(self.cfg.magic),
+                        "comment": f"{self.cfg.comment}-trail",
+                    }
+                    res = mt5.order_send(req)
+                    if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                        logger.info(f"[VerdictTrader] Trailing {side}: SL {p.sl} → {new_sl} (ticket {p.ticket})")
+                    else:
+                        logger.error(f"[VerdictTrader] Falha trailing (ticket {p.ticket}): {res if res else mt5.last_error()}")

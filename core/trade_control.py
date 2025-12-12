@@ -1,4 +1,4 @@
-# core/trade_control.py
+# FILE NAME: core/trade_control.py
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Tuple, Literal, List
@@ -8,7 +8,6 @@ import MetaTrader5 as mt5
 
 Side = Literal["BUY", "SELL"]
 
-
 @dataclass
 class TradeControlConfig:
     symbol: str
@@ -16,7 +15,7 @@ class TradeControlConfig:
 
     # Lote base e martingale
     base_lot: float = 0.01  #Não funciona
-    martingale_factor: float = 3.0
+    martingale_factor: float = 1.0 #Não funciona
     max_lot: float = 99.60  # trava de segurança
 
     # Janela do histórico para procurar o último resultado
@@ -24,7 +23,6 @@ class TradeControlConfig:
 
     # Disciplina: apenas 1 posição por vez?
     one_position_only: bool = True
-
 
 class TradeControl:
     """

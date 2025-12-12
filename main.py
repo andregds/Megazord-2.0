@@ -1,3 +1,4 @@
+# FILE NAME: main.py
 """main
 Ponto de entrada: orquestra o scanner multi‑timeframe, auto‑tuning, consenso local
 e veredito do DeepSeek (com fallback). Agora suporta múltiplos padrões clássicos.
@@ -47,7 +48,6 @@ os.environ.setdefault("TELEGRAM_TOKEN", TELEGRAM_TOKEN)
 os.environ.setdefault("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID)
 
 print("🔧 Padrões buscados:", ", ".join(PatternDetector.listar_padroes()))
-
 
 # Configura o logger da aplicação
 logging.basicConfig(
@@ -130,7 +130,7 @@ class Monitor:
             symbol=self.vt.cfg.symbol,
             magic=self.vt.cfg.magic,
             base_lot=self.vt.cfg.lot,
-            martingale_factor=3.0,
+            martingale_factor=1.0,
             max_lot=99.50,
             history_days=1,
             one_position_only=True,
@@ -290,53 +290,68 @@ class Monitor:
                                        f"Prob:{r['Probabilidade']}% | RSI:{r['RSI']} | EMA:{r['EMA']} | "
                                        f"VWAP:{r['VWAP']} | Preço:{r['Preço']} | Entry:{r['Entry']} | "
                                        f"Stop:{r['Stop']} | Target:{r['Target']}\n")
+
                         resumo += f"Parâmetros atuais: {params}\nPadrões mais frequentes: {ranking}\n"
 
-                        veredito = self.deepseek.analisar(resumo, retries=2, timeout=30, backoff=4)
-                        if isinstance(veredito, str) and veredito.startswith("Erro DeepSeek"):
-                            print(f"\n🤖 DeepSeek ERRO → {veredito}")
+                        # A chamada ao DeepSeek agora usa analisar_trade e espera um dicionário
+                        deepseek_response = self.deepseek.analisar_trade(resumo)
+
+                        if "error" in deepseek_response:
+                            print(f"\n🤖 DeepSeek ERRO → {deepseek_response['error']}")
                             print(f"Fallback (veredito local) → {veredito_local}")
-
-                        else:
-                            print(f"\n🤖 DeepSeek Veredito Final: {veredito}")
-
+                            # Aqui você pode decidir o que fazer em caso de erro grave do DeepSeek
+                            # Por exemplo, usar o veredito local ou simplesmente aguardar.
+                            # Por enquanto, vamos manter a lógica de fallback para o veredito local se a IA falhar.
                             side_to_trade = None
-                            if "COMPRA" in veredito.upper():
+                            if "COMPRA" in veredito_local.upper():
                                 side_to_trade = "BUY"
-
-                            elif "VENDA" in veredito.upper():
+                            elif "VENDA" in veredito_local.upper():
                                 side_to_trade = "SELL"
-                                logger.info(f"Motivo da decisão do DeepSeek: {veredito}")
+                            sl = 0.0 # Se usar fallback, SL/TP do local ou 0.0
+                            tp = 0.0
+                            logger.info(f"Motivo da decisão (Fallback): {veredito_local}")
+                        else:
+                            print(f"\n🤖 DeepSeek Veredito Final: {deepseek_response['veredito_text']}")
+                            side_to_trade = None
+                            if deepseek_response['decision'] == "COMPRA":
+                                side_to_trade = "BUY"
+                            elif deepseek_response['decision'] == "VENDA":
+                                side_to_trade = "SELL"
+                            sl = deepseek_response['sl']
+                            tp = deepseek_response['tp']
+                            logger.info(f"Motivo da decisão do DeepSeek: {deepseek_response['reason']}")
 
-                            if side_to_trade:
-                                if self.trade_ctl.is_position_open():
-                                    print("⏸️ Já existe posição aberta — decisão DeepSeek ignorada.")
-                                else:
-                                    price_now = self.vt._price_now(side_to_trade)
-                                    if price_now is None:
-                                        print("⚠️ Não foi possível obter preço atual – ordem não enviada.")
-                                    else:
-                                        sl, tp = self.deepseek.calcular_sl_tp(price_now)
-                                        order_res = self.vt._order_send_market(side_to_trade, price_now, sl, tp)
 
-                                        if order_res.get("ok"):
-                                            print(f"✅ Ordem {side_to_trade} enviada por decisão DeepSeek:")
-                                            print(f"    preço  = {price_now:.5f}")
-                                            print(f"    SL     = {sl:.5f}")
-                                            print(f"    TP     = {tp:.5f}")
-                                            print(f"    ticket = {order_res.get('result').order if order_res.get('result') else 'N/A'}")
-                                        else:
-                                            print(f"❌ Falha ao enviar ordem {side_to_trade} por decisão DeepSeek:")
-                                            print(f"    detalhe = {order_res}")
+                        if side_to_trade:
+                            if self.trade_ctl.is_position_open():
+                                print("⏸️ Já existe posição aberta — decisão DeepSeek ignorada.")
                             else:
-                                print(f"\n🤖 DeepSeek Veredito Final (sem ação): {veredito}")
+                                # O método _get_current_price foi renomeado para _price_now na sua descrição anterior,
+                                # mas no código que você forneceu, ele ainda é _get_current_price.
+                                # Vou manter _get_current_price aqui, mas se você renomeou, ajuste.
+                                price_now = self.vt._get_current_price(side_to_trade)
+                                if price_now is None:
+                                    print("⚠️ Não foi possível obter preço atual – ordem não enviada.")
+                                else:
+                                    # SL e TP agora vêm diretamente da resposta estruturada do DeepSeek
+                                    order_res = self.vt._order_send_market(side_to_trade, price_now, sl, tp)
 
+                                    if order_res.get("ok"):
+                                        print(f"✅ Ordem {side_to_trade} enviada por decisão DeepSeek:")
+                                        print(f"    preço  = {price_now:.5f}")
+                                        print(f"    SL     = {sl:.5f}")
+                                        print(f"    TP     = {tp:.5f}")
+                                        print(f"    ticket = {order_res.get('result').order if order_res.get('result') else 'N/A'}")
+                                    else:
+                                        print(f"❌ Falha ao enviar ordem {side_to_trade} por decisão DeepSeek:")
+                                        print(f"    detalhe = {order_res}")
+                        else:
+                            print(f"\n🤖 DeepSeek Veredito Final (sem ação): {deepseek_response['veredito_text']}")
 
                 else:
                     print("Nenhum padrão detectado.")
 
             # 👉 não há sleep aqui; o alinhamento é feito no topo do loop
-
 
 if __name__ == "__main__":
     M = Monitor()
