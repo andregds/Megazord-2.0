@@ -53,7 +53,7 @@ class TraderAI:
     # ===== chat =====
     def chat(self, text: str) -> dict:
         sys_msg = ("Você é o trader do robô Megazord Gold Premium (XAUUSD). "
-                   "Responda curto, prático e em PT-BR, focado em execução/risco.")
+                   "Responda curto, prático e em PT-BR, focado em execução/risco. sempre a favor da tendência")
         notes = self._notes_summary()
         if notes:
             sys_msg += f"\nMemorandos do operador: {notes}"

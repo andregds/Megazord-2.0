@@ -15,13 +15,13 @@ from datetime import datetime, timedelta
 from config import (
     SIGNAL_LOG_CSV, PARAM_LOG_CSV, TUNING_INTERVAL_MIN, TUNING_MIN_SIGNALS,
     TF_MINUTES, RSI_SOBRECOMPRA, RSI_SOBREVENDIDO, EMA_PERIOD, TOLERANCIA_PADRAO,
-    ATR_MULT_STOP, RR_MULT, EVAL_BARS   # <-- ADICIONADO AQUI
+    ATR_MULT_STOP, RR_MULT, EVAL_BARS
 )
 
 from core.analyzer import Analyzer
-
 from pathlib import Path
 # ... resto dos imports
+
 
 class AutoTuner:
     def __init__(self, signal_log: str = SIGNAL_LOG_CSV, param_log: str = PARAM_LOG_CSV):
@@ -39,8 +39,7 @@ class AutoTuner:
             "ATR_MULT_STOP": ATR_MULT_STOP,
             "RR_MULT": RR_MULT,
         }
-        self._last_tuning = datetime.utcnow() - timedelta(minutes=TUNING_INTERVAL_MIN+1)
-
+        self._last_tuning = datetime.utcnow() - timedelta(minutes=TUNING_INTERVAL_MIN + 1)
 
     def salvar_sinal(self, registro: dict) -> None:
         """Grava um sinal (PENDING) no CSV para posterior avaliação/ajuste."""
@@ -50,33 +49,62 @@ class AutoTuner:
         else:
             row.to_csv(self.signal_log, mode='a', header=False, index=False)
 
-    # dentro do core/autotuner.py
-
-
-
+    # =========================
+    # LEITURA ROBUSTA DO CSV
+    # =========================
     def _carregar_sinais(self):
-        """Lê o CSV de sinais de forma tolerante a erros de formatação."""
+        """Lê o CSV de sinais de forma tolerante e com tipos consistentes."""
         if not os.path.exists(self.signal_log):
             return pd.DataFrame()
 
         try:
-            # tentativa padrão
-            df = pd.read_csv(self.signal_log, parse_dates=["detect_time", "evaluated_at"])
+            df = pd.read_csv(
+                self.signal_log,
+                parse_dates=["detect_time", "evaluated_at"],
+                dtype={
+                    "symbol": "string",
+                    "timeframe": "string",
+                    "pattern": "string",
+                    "status": "string",
+                    "entry": "float64",
+                    "stop": "float64",
+                    "target": "float64",
+                },
+                na_values=["", "NaN", "null", None],
+                low_memory=False
+            )
         except Exception as e1:
             try:
-                # fallback com engine=python
+                # Fallback extremo
                 df = pd.read_csv(self.signal_log, engine="python")
             except Exception as e2:
                 print(f"[AutoTuner] Falha ao carregar {self.signal_log}: {e1} / {e2}")
                 return pd.DataFrame()
 
-        # Normaliza colunas esperadas
+        # =========================
+        # NORMALIZAÇÕES DEFENSIVAS
+        # =========================
         for col in ["detect_time", "evaluated_at"]:
             if col in df.columns:
-                try:
-                    df[col] = pd.to_datetime(df[col], errors="coerce")
-                except Exception:
-                    pass
+                df[col] = pd.to_datetime(df[col], errors="coerce")
+
+        if "status" in df.columns:
+            df["status"] = (
+                df["status"]
+                .astype("string")
+                .str.upper()
+                .str.strip()
+            )
+
+        if "pattern" in df.columns:
+            df["pattern"] = (
+                df["pattern"]
+                .astype("string")
+                .str.strip()
+            )
+
+        # Remove registros estruturalmente inválidos (não interfere nos válidos)
+        df = df.dropna(subset=["status", "entry", "stop", "target"], how="any")
 
         return df
 
@@ -96,8 +124,7 @@ class AutoTuner:
             if pd.isna(r.get("detect_time")):
                 continue
 
-            # aguarda ao menos EVAL_BARS candles após a detecção
-            tf_minutes = TF_MINUTES.get(tf_name, 5)  # fallback 5min se vier algo inesperado
+            tf_minutes = TF_MINUTES.get(tf_name, 5)
             min_dt = r["detect_time"] + timedelta(minutes=tf_minutes * EVAL_BARS)
             if datetime.utcnow() < min_dt:
                 continue
@@ -107,8 +134,15 @@ class AutoTuner:
             target = float(r["target"])
 
             status, when = Analyzer.avaliar_trade(
-                mt5c, tf_name, r["detect_time"], entry, stop, target, eval_bars=EVAL_BARS
+                mt5c,
+                tf_name,
+                r["detect_time"],
+                entry,
+                stop,
+                target,
+                eval_bars=EVAL_BARS
             )
+
             if status != "PENDING":
                 df.at[idx, "status"] = status
                 df.at[idx, "evaluated_at"] = when if when is not None else datetime.utcnow()
@@ -116,6 +150,7 @@ class AutoTuner:
 
         if atualizados:
             df.to_csv(self.signal_log, index=False)
+
         return atualizados
 
     def _registrar_parametros(self, metrics: dict) -> None:
@@ -129,27 +164,37 @@ class AutoTuner:
 
     def ajustar_parametros(self) -> dict:
         """Recalibra parâmetros a partir da acurácia recente (thresholds simples)."""
-        if (datetime.utcnow() - self._last_tuning).total_seconds() < TUNING_INTERVAL_MIN*60:
+        if (datetime.utcnow() - self._last_tuning).total_seconds() < TUNING_INTERVAL_MIN * 60:
             return self.params
 
         df = self._carregar_sinais()
         if df.empty or "status" not in df:
             return self.params
 
-        df_eval = df[df["status"].isin(["GAIN","LOSS"])]
+        df_eval = df[df["status"].isin(["GAIN", "LOSS"])]
         if len(df_eval) < TUNING_MIN_SIGNALS:
             return self.params
 
-        acc_by_pattern = df_eval.groupby("pattern")["status"].apply(lambda x: (x=="GAIN").mean()).to_dict()
-        acc_global = (df_eval["status"]=="GAIN").mean()
+        acc_by_pattern = (
+            df_eval
+            .groupby("pattern")["status"]
+            .apply(lambda x: (x == "GAIN").mean())
+            .to_dict()
+        )
 
-        # Regras simples de ajuste
+        acc_global = (df_eval["status"] == "GAIN").mean()
+
+        # =========================
+        # REGRAS DE AJUSTE
+        # =========================
         if acc_by_pattern.get("Double Bottom", 1.0) < 0.55:
             self.params["RSI_SOBREVENDIDO"] = min(45, self.params["RSI_SOBREVENDIDO"] + 3)
             self.params["TOLERANCIA"]       = min(0.0025, self.params["TOLERANCIA"] + 0.0002)
+
         if acc_by_pattern.get("Double Top", 1.0) < 0.55:
             self.params["RSI_SOBRECOMPRA"] = max(55, self.params["RSI_SOBRECOMPRA"] - 3)
             self.params["TOLERANCIA"]      = min(0.0025, self.params["TOLERANCIA"] + 0.0002)
+
         if acc_global < 0.55:
             self.params["ATR_MULT_STOP"] = min(2.0, self.params["ATR_MULT_STOP"] + 0.1)
             self.params["RR_MULT"]       = max(1.4, self.params["RR_MULT"] - 0.1)
@@ -160,6 +205,7 @@ class AutoTuner:
             "acc_global":        acc_global,
             "samples":           len(df_eval)
         }
+
         self._registrar_parametros(metrics)
         self._last_tuning = datetime.utcnow()
         return self.params
