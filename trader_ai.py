@@ -133,7 +133,7 @@ class TraderAI:
         side_eff = ("SELL" if side.upper()=="BUY" else "BUY") if inv==1 else side.upper()
         px_now = self._px_now(side_eff)
 
-        lots = lots if lots is not None else getattr(self.trader, "default_lots", 0.01)
+        lots = lots if lots is not None else getattr(self.trader, "default_lots", 0.08)
         near = self.default_near_pct if near_pct is None else float(near_pct)
 
         _entry = px_now if entry is None else float(entry)

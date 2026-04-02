@@ -14,7 +14,7 @@ class TradeControlConfig:
     magic: int
 
     # Lote base e martingale
-    base_lot: float = 0.01  #Não funciona
+    base_lot: float = 0.25  #Não funciona
     martingale_factor: float = 1.0 #Não funciona
     max_lot: float = 99.60  # trava de segurança
 

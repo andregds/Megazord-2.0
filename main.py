@@ -13,6 +13,7 @@ import time
 import json
 import pandas as pd
 from datetime import datetime, timedelta
+from Sincronizador_de_horario import sync_windows_time
 
 from config import (
     DEEPSEEK_API_KEY,
@@ -40,8 +41,8 @@ from core.verdict_trader import VerdictTrader, VerdictTraderConfig
 from core.trade_control import TradeControl, TradeControlConfig
 
 # --- Credenciais do Telegram (via ENV, com fallback) ---
-TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "8203615899:AAGhBysgD88tEvZdyXvI-hL6IU6WVxW7950")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "183379814")
+TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "8288271011:AAHN85gL63VB6t1z4ER8jdbb-19_lGK6hSM") # Seu token do bot
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "-1003877903665")
 
 os.environ.setdefault("DEEPSEEK_API_KEY", DEEPSEEK_API_KEY)
 os.environ.setdefault("TELEGRAM_TOKEN", TELEGRAM_TOKEN)
@@ -89,7 +90,7 @@ class Monitor:
         # Adaptador de envio de ordens para o TraderAI
         def _ai_send_order_wrapper(trader, side, px_now, entry, sl, tp, lots=None, near_pct=0.0001):
             try:
-                lots = lots or 0.01
+                lots = lots or 0.02
                 if max(px_now, 1) > 0 and entry is not None and abs(entry - px_now) / px_now < float(near_pct):
                     fn = getattr(self.mt5, "market_order", None) or getattr(self.mt5, "enviar_ordem_market", None)
                     if callable(fn):
@@ -133,7 +134,7 @@ class Monitor:
             martingale_factor=1.0,
             max_lot=99.50,
             history_days=1,
-            one_position_only=True,
+            one_position_only=False,
         ))
 
     def dentro_do_horario(self) -> bool:
@@ -201,6 +202,7 @@ class Monitor:
         self.mt5.conectar()
 
         while True:
+            sync_windows_time() # sincroniza o horario
             self._sleep_until_next_5min()
 
             if not self.dentro_do_horario():

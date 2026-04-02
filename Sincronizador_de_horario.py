@@ -10,7 +10,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
-SYNC_INTERVAL = 30 * 60  # 30 minutos em segundos
+SYNC_INTERVAL = 0 * 0  # 30 minutos em segundos
 
 def sync_windows_time():
     try:
@@ -31,7 +31,6 @@ def sync_windows_time():
 
 if __name__ == "__main__":
     logging.info("Script de sincronização iniciado")
-
-    while True:
-        sync_windows_time()
-        time.sleep(SYNC_INTERVAL)
+    sync_windows_time()
+    time.sleep(SYNC_INTERVAL)
+    print('Hora sincronizada com sucesso!')

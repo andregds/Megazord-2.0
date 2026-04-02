@@ -27,7 +27,7 @@ Side = Literal["BUY", "SELL"]
 class VerdictTraderConfig:
     # Símbolo e execução
     symbol: str = os.getenv("VERDICT_SYMBOL", "XAUUSD")
-    lot: float = float(os.getenv("VERDICT_LOT", "0.01"))
+    lot: float = float(os.getenv("VERDICT_LOT", "0.02"))
     deviation_points: int = int(os.getenv("VERDICT_DEVIATION_PTS", "60"))
     magic: int = int(os.getenv("VERDICT_MAGIC", "880031"))
     comment: str = os.getenv("VERDICT_COMMENT", "VerdictTrader")
