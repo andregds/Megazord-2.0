@@ -25,6 +25,7 @@ from config import (
     MIN_SCORE_TRADE,
     DETECTOR_PARAMS,
     TOLERANCIA_PADRAO,
+    VERDICT_FINAL_SOURCE,
 )
 
 from connectors.mt5_connector import MT5Connector
@@ -216,6 +217,7 @@ class Monitor:
 
             print(f"\n🔎 {datetime.utcnow()} → Scanner Multi-Timeframe | Params: {params}")
             resultados = []
+            processed_dfs = {}
 
             for nome, tf in TIMEFRAMES.items():
                 df = self.mt5.obter_candles(tf, QTD_CANDLES)
@@ -223,6 +225,8 @@ class Monitor:
                     continue
 
                 df = Indicators.aplicar(df, ema_period=params["EMA_PERIOD"])
+                # armazenar df processado para checagens posteriores (ex: flat MA / proximidade)
+                processed_dfs[nome] = df
                 padroes = PatternDetector.detect_all(df, tolerancia=params["TOLERANCIA"], params=DETECTOR_PARAMS)
                 if not padroes:
                     continue
@@ -299,33 +303,125 @@ class Monitor:
                     )
                 resumo += f"Parâmetros atuais: {params}\nPadrões mais frequentes: {ranking}\n"
 
-                # 👉 Consulta à API do DeepSeek SÓ ACONTECE se chegou até aqui (ou seja, sem posição aberta)
-                deepseek_response = self.deepseek.analisar_trade(resumo)
+                # --- FILTRO MULTI-TF: verifica EMA flat antes de gastar tokens/CPU ---
+                try:
+                    from config import VERDICT_FLAT_FILTER_ENABLE, VERDICT_FLAT_TFS, VERDICT_FLAT_MODE, VERDICT_FLAT_LOOKBACK
+                    if VERDICT_FLAT_FILTER_ENABLE:
+                        any_flat = False
+                        for tf_key in VERDICT_FLAT_TFS:
+                            df_for_tf = processed_dfs.get(tf_key)
+                            if self.vt.is_market_flat(df_for_tf, mode=VERDICT_FLAT_MODE, lookback=VERDICT_FLAT_LOOKBACK):
+                                msg = f"⏸️ Ciclo abortado: EMA está plana em {tf_key} (modo={VERDICT_FLAT_MODE}) — DeepSeek NÃO será consultado."
+                                print(msg)
+                                logger.info(msg)
+                                try:
+                                    log_path = os.path.join(os.getcwd(), "Logs", "log_api.log")
+                                    self.deepseek._rotate_and_append(log_path, f"PRECHECK_ABORT: {msg}\n")
+                                except Exception:
+                                    pass
+                                any_flat = True
+                                break
+                        if any_flat:
+                            continue
+                except Exception:
+                    logger.debug("Falha na checagem EMA flat antes do DeepSeek")
 
-                if "error" in deepseek_response:
-                    print(f"\n🤖 DeepSeek ERRO → {deepseek_response['error']}")
-                    print(f"Fallback (veredito local) → {veredito_local}")
+                # --- FILTRO DE PROXIMIDADE MA9: Pré-IA (economiza tokens) ---
+                try:
+                    from config import VERDICT_PROXIMITY_FILTER_ENABLE
+                    if VERDICT_PROXIMITY_FILTER_ENABLE:
+                        df_m15 = processed_dfs.get("M15")
+                        if df_m15 is not None and len(df_m15) > 0:
+                            preco_atual = float(df_m15["close"].iloc[-1])
+                            if not self.vt.is_price_within_proximity(df_m15, preco_atual):
+                                msg = (f"⏸️ [FILTRO PROXIMIDADE] Ciclo Pré-IA abortado em M15: "
+                                       f"Preço atual ({preco_atual:.2f}) distante da EMA9. DeepSeek poupado.")
+                                print(msg)
+                                logger.info(msg)
+                                try:
+                                    log_path = os.path.join(os.getcwd(), "Logs", "log_api.log")
+                                    self.deepseek._rotate_and_append(log_path, f"PRECHECK_ABORT: {msg}\n")
+                                except Exception:
+                                    pass
+                                continue
+                except Exception:
+                    logger.debug("Falha na checagem de proximidade pré-IA")
 
-                    side_to_trade = None
+                # Decisão final: pode ser 'local', 'deepseek' ou 'hybrid' (configurado em config.VERDICT_FINAL_SOURCE)
+                side_to_trade = None
+                sl = 0.0
+                tp = 0.0
+
+                if VERDICT_FINAL_SOURCE == "local":
+                    # Não chama a IA — segue veredito local
+                    print("ℹ️ VERDICT_FINAL_SOURCE=local -> seguindo veredito local sem consultar DeepSeek.")
                     if "COMPRA" in veredito_local.upper():
                         side_to_trade = "BUY"
                     elif "VENDA" in veredito_local.upper():
                         side_to_trade = "SELL"
 
-                    # no fallback você pode depois trocar SL/TP por algo calculado localmente
-                    sl = 0.0
-                    tp = 0.0
-                    logger.info(f"Motivo da decisão (Fallback): {veredito_local}")
+                    if side_to_trade and resultados:
+                        # escolhe um candidato representativo para SL/TP (primeiro com mesmo sinal ou primeiro geral)
+                        candidate = None
+                        for cand in resultados:
+                            try:
+                                if cand.get("Sinal") and cand["Sinal"].upper() in veredito_local.upper():
+                                    candidate = cand
+                                    break
+                            except Exception:
+                                continue
+                        if candidate is None:
+                            candidate = resultados[0]
+                        sl = candidate.get("Stop", 0.0)
+                        tp = candidate.get("Target", 0.0)
+
                 else:
-                    print(f"\n🤖 DeepSeek Veredito Final: {deepseek_response['veredito_text']}")
-                    side_to_trade = None
-                    if deepseek_response['decision'] == "COMPRA":
-                        side_to_trade = "BUY"
-                    elif deepseek_response['decision'] == "VENDA":
-                        side_to_trade = "SELL"
-                    sl = deepseek_response['sl']
-                    tp = deepseek_response['tp']
-                    logger.info(f"Motivo da decisão do DeepSeek: {deepseek_response['reason']}")
+                    # Chama DeepSeek (modo 'deepseek' ou 'hybrid')
+                    try:
+                        log_path = os.path.join(os.getcwd(), "Logs", "log_api.log")
+                        self.deepseek._rotate_and_append(log_path, f"CALLING_DEEPSEEK: resumo_len={len(resumo)}\n")
+                    except Exception:
+                        pass
+                    deepseek_response = self.deepseek.analisar_trade(resumo)
+
+                    if "error" in deepseek_response:
+                        print(f"\n🤖 DeepSeek ERRO → {deepseek_response['error']}")
+                        if VERDICT_FINAL_SOURCE == "hybrid":
+                            # fallback para veredito local (comportamento legacy)
+                            print(f"Fallback (veredito local) → {veredito_local}")
+                            if "COMPRA" in veredito_local.upper():
+                                side_to_trade = "BUY"
+                            elif "VENDA" in veredito_local.upper():
+                                side_to_trade = "SELL"
+                            if side_to_trade and resultados:
+                                # escolhe um candidato representativo para SL/TP
+                                candidate = None
+                                for cand in resultados:
+                                    try:
+                                        if cand.get("Sinal") and cand["Sinal"].upper() in veredito_local.upper():
+                                            candidate = cand
+                                            break
+                                    except Exception:
+                                        continue
+                                if candidate is None:
+                                    candidate = resultados[0]
+                                sl = candidate.get("Stop", 0.0)
+                                tp = candidate.get("Target", 0.0)
+                            logger.info(f"Motivo da decisão (Fallback): {veredito_local}")
+                        else:
+                            # modo 'deepseek' exige resposta da IA — sem fallback
+                            print("⚠️ VERDICT_FINAL_SOURCE=deepseek -> sem fallback. Nenhuma ação será tomada.")
+                            side_to_trade = None
+
+                    else:
+                        print(f"\n🤖 DeepSeek Veredito Final: {deepseek_response['veredito_text']}")
+                        if deepseek_response['decision'] == "COMPRA":
+                            side_to_trade = "BUY"
+                        elif deepseek_response['decision'] == "VENDA":
+                            side_to_trade = "SELL"
+                        sl = deepseek_response['sl']
+                        tp = deepseek_response['tp']
+                        logger.info(f"Motivo da decisão do DeepSeek: {deepseek_response['reason']}")
 
                 if side_to_trade:
                     # Checagem FINAL de segurança (caso algo tenha aberto posição entre a análise e o envio)
@@ -351,7 +447,15 @@ class Monitor:
                                 print(f"❌ Falha ao enviar ordem {side_to_trade} por decisão DeepSeek:")
                                 print(f"    detalhe = {order_res}")
                 else:
-                    print(f"\n🤖 DeepSeek Veredito Final (sem ação): {deepseek_response['veredito_text']}")
+                    # Evita referenciar `deepseek_response` quando não foi definido (modo 'local')
+                    if VERDICT_FINAL_SOURCE == "local":
+                        print(f"\nℹ️ Veredito final (local) sem ação: {veredito_local}")
+                    else:
+                        # Se estiver no modo 'deepseek' ou 'hybrid', tente mostrar a resposta da IA se disponível
+                        if 'deepseek_response' in locals() and isinstance(deepseek_response, dict):
+                            print(f"\n🤖 DeepSeek Veredito Final (sem ação): {deepseek_response.get('veredito_text', '<sem texto>')}")
+                        else:
+                            print("\n🤖 DeepSeek Veredito Final (sem ação): <nenhuma resposta DeepSeek disponível>")
             else:
                 print("Nenhum padrão detectado.")
 

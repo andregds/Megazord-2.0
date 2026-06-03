@@ -40,6 +40,8 @@ class Indicators:
         """Adiciona colunas: EMA, RSI, VWAP, VOL_MA e ATR; retorna df sem NaNs iniciais."""
         df = df.copy()
         df["EMA"] = df["close"].ewm(span=ema_period, adjust=False).mean()
+        # EMA de 9 períodos, usada pelo gatilho de proximidade
+        df["ema_9"] = df["close"].ewm(span=9, adjust=False).mean()
         df["RSI"] = Indicators.calcular_rsi(df["close"], period=rsi_period) # Passando o período do RSI
         df["VWAP"] = (df["close"] * df["tick_volume"]).cumsum() / df["tick_volume"].cumsum()
         df["VOL_MA"] = df["tick_volume"].rolling(20).mean()

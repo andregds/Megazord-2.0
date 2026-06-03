@@ -8,6 +8,7 @@ import MetaTrader5 as mt5
 import logging
 import pandas as pd
 from core.indicators import Indicators # Importação confirmada
+from config import VERDICT_FLAT_FILTER_ENABLE, VERDICT_FLAT_MODE, VERDICT_FLAT_LOOKBACK, VERDICT_FLAT_ATR_K, VERDICT_PROXIMITY_ATR_K
 
 # Importar o novo módulo DailyProfitChecker
 from core.daily_profit_checker import DailyProfitChecker, PROFIT_TARGET # Importamos também PROFIT_TARGET para logar
@@ -100,6 +101,55 @@ class VerdictTrader:
         elif side == "SELL":
             return symbol_info_tick.bid
         return None
+
+    # --- Proteções e checagens utilitárias ---
+    def is_market_flat(self, df: Optional[pd.DataFrame], mode: str = None, lookback: int = None) -> bool:
+        """Detecta se a EMA está 'flat' no dataframe fornecido.
+        Modo 'atr' compara delta ema versus k * ATR; retorna True se flat (i.e., bloquear).
+        """
+        try:
+            if df is None or df.empty:
+                return True
+            if mode is None:
+                mode = VERDICT_FLAT_MODE
+            if lookback is None:
+                lookback = VERDICT_FLAT_LOOKBACK
+            if len(df) < lookback + 2:
+                return True
+            if 'EMA' not in df.columns:
+                return True
+            ema_now = float(df['EMA'].iloc[-1])
+            ema_past = float(df['EMA'].iloc[-(lookback+1)])
+            delta = abs(ema_now - ema_past)
+            if mode == 'atr':
+                if 'ATR' not in df.columns:
+                    return True
+                atr_now = float(df['ATR'].iloc[-1])
+                thr = float(VERDICT_FLAT_ATR_K) * atr_now
+                return delta < thr
+            elif mode == 'abs':
+                # fallback absolute threshold (0.5 price units)
+                return delta < 0.5
+            else: # pct
+                return (delta / max(abs(ema_past), 1.0)) < 0.001
+        except Exception:
+            return True
+
+    def is_price_within_proximity(self, df: Optional[pd.DataFrame], price: float, k: Optional[float] = None) -> bool:
+        """Verifica se o preço está dentro de k * ATR da EMA9. Retorna True se OK (permitir operar)."""
+        try:
+            if df is None or df.empty:
+                return False
+            if k is None:
+                k = VERDICT_PROXIMITY_ATR_K
+            if 'ema_9' not in df.columns or 'ATR' not in df.columns:
+                return False
+            ema9 = float(df['ema_9'].iloc[-1])
+            atr = float(df['ATR'].iloc[-1])
+            lim = float(k) * atr
+            return abs(price - ema9) <= lim
+        except Exception:
+            return False
 
     # Renomeado para _price_now para consistência com a discussão anterior
     _price_now = _get_current_price

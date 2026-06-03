@@ -53,6 +53,33 @@ class DeepSeekClient:
     def _url(self) -> str:
         return f"{self.base_url}{self.chat_path}"
 
+    def _rotate_and_append(self, path: str, text: str, max_bytes: int = 10 * 1024 * 1024, backups: int = 4) -> None:
+        """Append text to path, rotating when size exceeds max_bytes."""
+        try:
+            if os.path.exists(path) and os.path.getsize(path) > max_bytes:
+                for i in range(backups - 1, 0, -1):
+                    s = f"{path}.{i}"
+                    d = f"{path}.{i+1}"
+                    if os.path.exists(s):
+                        try:
+                            os.replace(s, d)
+                        except Exception:
+                            pass
+                try:
+                    os.replace(path, f"{path}.1")
+                except Exception:
+                    try:
+                        os.remove(path)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        try:
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(text)
+        except Exception:
+            logger.debug("Não foi possível escrever no log_api.log")
+
     # Este método calcular_sl_tp não será mais usado diretamente para a decisão da IA,
     # pois a IA definirá SL/TP. Mantê-lo ou removê-lo depende se ele tem outro uso.
     # Por enquanto, vamos mantê-lo, mas ele não será chamado pelo main.py para a decisão da IA.
@@ -93,6 +120,36 @@ class DeepSeekClient:
                     "stream": bool(stream),
                 }
 
+                # prepare logging
+                try:
+                    log_dir = os.path.join(os.getcwd(), "Logs")
+                    os.makedirs(log_dir, exist_ok=True)
+                    log_path = os.path.join(log_dir, "log_api.log")
+                    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                    pre_header = f"{ts} | DeepSeek REQUEST -> model={model} url={url} timeout={to}s attempt={attempt+1}/{retries+1}\n"
+                    # mask headers
+                    try:
+                        headers_masked = dict(self._headers())
+                        if "Authorization" in headers_masked:
+                            headers_masked["Authorization"] = "***MASKED***"
+                    except Exception:
+                        headers_masked = {"Authorization": "***MASKED***"}
+
+                    log_text = pre_header
+                    try:
+                        log_text += "REQUEST_HEADERS:\n" + json.dumps(headers_masked, ensure_ascii=False, default=str) + "\n"
+                    except Exception:
+                        log_text += "REQUEST_HEADERS: <unserializable>\n"
+                    try:
+                        log_text += "REQUEST_PAYLOAD:\n" + json.dumps(payload, ensure_ascii=False, default=str) + "\n"
+                    except Exception:
+                        log_text += "REQUEST_PAYLOAD: <unserializable>\n"
+                    print(pre_header.strip())
+                    logger.info(pre_header.strip())
+                    self._rotate_and_append(log_path, log_text)
+                except Exception:
+                    logger.debug("Falha ao preparar log de requisição DeepSeek")
+
                 resp = requests.post(url, headers=self._headers(), json=payload, timeout=to)
                 resp.raise_for_status() # Levanta um HTTPError para códigos de status de erro (4xx ou 5xx)
 
@@ -103,6 +160,23 @@ class DeepSeekClient:
                     # Se precisar de stream, esta parte precisará de uma implementação mais complexa.
                     logger.warning("Streaming não implementado para _call_api neste contexto.")
                     return {"error": "Streaming not implemented for _call_api"}
+
+                # log response
+                try:
+                    ts2 = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                    post_header = f"{ts2} | DeepSeek RESPONSE <- status={resp.status_code} model={model}\n"
+                    print(post_header.strip())
+                    logger.info(post_header.strip())
+                    try:
+                        resp_text = post_header + "RESPONSE_BODY:\n" + json.dumps(data, ensure_ascii=False, default=str) + "\n"
+                    except Exception:
+                        resp_text = post_header + "RESPONSE_BODY: <unserializable>\n"
+                    try:
+                        self._rotate_and_append(log_path, resp_text)
+                    except Exception:
+                        pass
+                except Exception:
+                    logger.debug("Falha ao gravar log de resposta DeepSeek")
 
                 return {"content": data["choices"][0]["message"]["content"].strip()}
 

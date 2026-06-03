@@ -2,6 +2,7 @@
 
 import MetaTrader5 as mt5
 
+
 # === Chaves e Ativo ===
 FRED_API_KEY = "c37a9221da8ffd2ad23c9f964882475b"
 DEEPSEEK_API_KEY = "sk-6a50a8216f2e4db9a2e3698b2c505b06"
@@ -24,6 +25,28 @@ ATR_PERIOD = 14
 ATR_MULT_STOP = 1.5
 RR_MULT = 2.0
 EVAL_BARS = 12
+
+# === Verdict / Pre-IA filters (used by core.verdict_trader and main prechecks)
+# Habilita checagem multi-timeframe se a EMA estiver 'flat' para economizar chamadas à IA
+VERDICT_FLAT_FILTER_ENABLE = True
+# Timeframes a checar para o filtro de EMA "flat" (chaves do dicionário TIMEFRAMES/TF_MINUTES)
+VERDICT_FLAT_TFS = ["M15", "M30"]
+# Modo de checagem: 'atr' (delta EMA < k * ATR), 'abs' (valor absoluto), ou 'pct' (fração)
+VERDICT_FLAT_MODE = "atr"
+# Lookback (n barras) usado para comparar EMA atual vs EMA passada
+VERDICT_FLAT_LOOKBACK = 24
+# Coeficiente k aplicado ao ATR para definir limiar de 'flat'
+VERDICT_FLAT_ATR_K = 0.5
+
+# Habilita filtro de proximidade (preço dentro de k * ATR da EMA9) antes da chamada à IA
+VERDICT_PROXIMITY_FILTER_ENABLE = True
+# k usado no cálculo de proximidade em relação à ATR (ema9 ± k * ATR)
+VERDICT_PROXIMITY_ATR_K = 1.0
+
+# Fonte do veredito final: 'deepseek' = exigir decisão da IA;
+# 'local' = não chamar a IA e seguir veredito local;
+# 'hybrid' = (padrão) usar DeepSeek quando disponível, senão fallback local.
+VERDICT_FINAL_SOURCE = "local"
 
 # === Auto-Tuning ===
 TUNING_MIN_SIGNALS = 20
