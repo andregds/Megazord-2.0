@@ -32,6 +32,12 @@ try:
     from config import DEEPSEEK_CHAT_PATH  # opcional
 except ImportError:
     DEEPSEEK_CHAT_PATH = os.getenv("DEEPSEEK_CHAT_PATH", "/chat/completions")
+# Tentar importar configuração do Ollama (opcional)
+try:
+    from config import OLLAMA_BASE_URL, OLLAMA_MODEL_NAME
+except ImportError:
+    OLLAMA_BASE_URL = None
+    OLLAMA_MODEL_NAME = None
 
 class DeepSeekClient:
     """Encapsula chamadas à DeepSeek com timeout, retries e backoff exponencial leve."""
@@ -43,14 +49,23 @@ class DeepSeekClient:
         timeout: float = 60.0,
     ):
         self.api_key = (api_key or DEEPSEEK_API_KEY).strip()
-        self.base_url = (base_url or DEEPSEEK_BASE_URL).rstrip("/")
-        self.chat_path = (chat_path or DEEPSEEK_CHAT_PATH) or "/chat/completions"
+        # Se OLLAMA estiver configurado, preferimos ele
+        self.ollama_base = (OLLAMA_BASE_URL or None)
+        self.ollama_model = (OLLAMA_MODEL_NAME or None)
+        if self.ollama_base:
+            self.base_url = self.ollama_base.rstrip("/")
+            self.chat_path = None
+        else:
+            self.base_url = (base_url or DEEPSEEK_BASE_URL).rstrip("/")
+            self.chat_path = (chat_path or DEEPSEEK_CHAT_PATH) or "/chat/completions"
         self.timeout = timeout
         if not self.api_key:
             raise ValueError("DeepSeek API key não configurada (DEEPSEEK_API_KEY).")
 
     # ---- internos ----
     def _url(self) -> str:
+        if self.ollama_base:
+            return self.base_url
         return f"{self.base_url}{self.chat_path}"
 
     def _rotate_and_append(self, path: str, text: str, max_bytes: int = 10 * 1024 * 1024, backups: int = 4) -> None:
@@ -90,10 +105,11 @@ class DeepSeekClient:
         return sl, tp
 
     def _headers(self) -> Dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        # Ollama local normalmente não exige Authorization header.
+        h = {"Content-Type": "application/json"}
+        if not self.ollama_base and self.api_key:
+            h["Authorization"] = f"Bearer {self.api_key}"
+        return h
 
     # ---- pública ----
     # O método 'analisar' original será adaptado para ser mais genérico e usado internamente
@@ -113,12 +129,25 @@ class DeepSeekClient:
 
         for attempt in range(retries + 1):
             try:
-                payload: Dict[str, Any] = {
-                    "model": model,
-                    "messages": messages,
-                    "temperature": float(temperature),
-                    "stream": bool(stream),
-                }
+                # Se Ollama estiver configurado, convertemos as mensagens para um prompt único
+                if self.ollama_base:
+                    # Junta mensagens system/user/assistant em um único prompt
+                    parts = []
+                    for m in messages:
+                        role = m.get("role", "user").upper()
+                        parts.append(f"[{role}] {m.get('content','')}")
+                    prompt_text = "\n\n".join(parts)
+                    payload: Dict[str, Any] = {
+                        "model": (self.ollama_model or model),
+                        "input": prompt_text,
+                    }
+                else:
+                    payload: Dict[str, Any] = {
+                        "model": model,
+                        "messages": messages,
+                        "temperature": float(temperature),
+                        "stream": bool(stream),
+                    }
 
                 # prepare logging
                 try:
@@ -164,7 +193,7 @@ class DeepSeekClient:
                 # log response
                 try:
                     ts2 = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-                    post_header = f"{ts2} | DeepSeek RESPONSE <- status={resp.status_code} model={model}\n"
+                    post_header = f"{ts2} | Model RESPONSE <- status={resp.status_code} model={model}\n"
                     print(post_header.strip())
                     logger.info(post_header.strip())
                     try:
@@ -176,9 +205,47 @@ class DeepSeekClient:
                     except Exception:
                         pass
                 except Exception:
-                    logger.debug("Falha ao gravar log de resposta DeepSeek")
+                    logger.debug("Falha ao gravar log de resposta do modelo")
 
-                return {"content": data["choices"][0]["message"]["content"].strip()}
+                # Tentar extrair texto da resposta de forma robusta (suporta Ollama e formato estilo OpenAI)
+                extracted = None
+                try:
+                    # OpenAI-like
+                    if isinstance(data, dict) and "choices" in data and data["choices"]:
+                        c = data["choices"][0]
+                        if isinstance(c, dict) and "message" in c and isinstance(c["message"], dict):
+                            extracted = c["message"].get("content")
+                        elif isinstance(c, dict) and "text" in c:
+                            extracted = c.get("text")
+                    # Ollama-like: possible keys 'result', 'output', 'response', 'generated'
+                    if extracted is None and isinstance(data, dict):
+                        if "result" in data and isinstance(data["result"], dict):
+                            # buscar campos comuns
+                            for k in ("output", "text", "content", "response"):
+                                if k in data["result"]:
+                                    val = data["result"][k]
+                                    if isinstance(val, list):
+                                        extracted = "\n".join(str(x) for x in val)
+                                    else:
+                                        extracted = str(val)
+                                    break
+                        if extracted is None and "output" in data:
+                            out = data["output"]
+                            if isinstance(out, list):
+                                extracted = "\n".join(str(x) for x in out)
+                            else:
+                                extracted = str(out)
+                        if extracted is None and "response" in data:
+                            extracted = str(data["response"])
+                        if extracted is None and "generated" in data:
+                            extracted = str(data["generated"])                
+                except Exception:
+                    extracted = None
+
+                if extracted:
+                    return {"content": extracted.strip()}
+                # último recurso: devolver erro com dump
+                return {"error": f"No textual content found in model response", "raw": data}
 
             except requests.exceptions.RequestException as e:
                 logger.error(f"Erro na requisição DeepSeek (tentativa {attempt+1}/{retries+1}): {e}")
