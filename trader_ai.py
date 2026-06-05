@@ -3,6 +3,11 @@ from __future__ import annotations
 import os, json, re, requests
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
+try:
+    from config import OLLAMA_API_BASE_URL, OLLAMA_MODEL_NAME
+except Exception:
+    OLLAMA_API_BASE_URL = os.getenv("OLLAMA_API_BASE_URL")
+    OLLAMA_MODEL_NAME = os.getenv("OLLAMA_MODEL_NAME")
 
 class TraderAI:
     def __init__(self,
@@ -19,8 +24,9 @@ class TraderAI:
         self.default_near_pct = default_near_pct
         self.default_invert_flag = default_invert_flag
 
-        self.api_key = os.getenv("DEEPSEEK_API_KEY") or None
-        self.model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+        # Usa Ollama local quando disponível
+        self.ollama_base = OLLAMA_API_BASE_URL or None
+        self.model = OLLAMA_MODEL_NAME or os.getenv("OLLAMA_MODEL_NAME", "deepseek-chat")
         self.chat_path = "./calibration/trader_chat.jsonl"
         self.notes_path = "./calibration/coach_notes.jsonl"
         os.makedirs("./calibration", exist_ok=True)
@@ -58,24 +64,48 @@ class TraderAI:
         if notes:
             sys_msg += f"\nMemorandos do operador: {notes}"
 
-        if not self.api_key:
-            reply = "IA externa não configurada (DEEPSEEK_API_KEY ausente). Anotei sua mensagem."
+        if not self.ollama_base:
+            reply = "IA externa não configurada (OLLAMA_API_BASE_URL ausente). Anotei sua mensagem."
             self._append_jsonl(self.chat_path, {"ts": self._utcnow(), "user": text, "assistant": reply})
             return {"ok": True, "reply": reply, "used_model": None}
 
         try:
+            # Construir prompt para Ollama
+            prompt = f"[SYSTEM] {sys_msg}\n\n[USER] {text}"
             body = {
                 "model": self.model,
-                "messages": [{"role":"system","content":sys_msg},{"role":"user","content":text}],
-                "temperature": 0.2
+                "prompt": prompt,
+                "stream": False,
             }
-            r = requests.post(
-                "https://api.deepseek.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-                json=body, timeout=30
-            )
-            r.raise_for_status()
-            reply = r.json()["choices"][0]["message"]["content"].strip()
+            try:
+                # Aumenta timeout para permitir respostas mais lentas do Ollama local (antes 4.5s)
+                r = requests.post(self.ollama_base, headers={"Content-Type": "application/json"}, json=body, timeout=45.0)
+                r.raise_for_status()
+                data = r.json()
+                # tenta extrair texto em várias chaves possíveis
+                if isinstance(data, dict):
+                    if "result" in data and isinstance(data["result"], dict):
+                        reply = data["result"].get("output") or data["result"].get("text") or str(data["result"])
+                    elif "output" in data:
+                        reply = data.get("output")
+                    elif "response" in data:
+                        reply = data.get("response")
+                    else:
+                        # fallback para raw text
+                        reply = json.dumps(data, ensure_ascii=False)
+                else:
+                    reply = str(data)
+                if isinstance(reply, list):
+                    reply = "\n".join(str(x) for x in reply)
+                reply = str(reply).strip()
+            except requests.exceptions.Timeout:
+                reply = "(Falha: Timeout ao conectar com Ollama local)"
+            except requests.exceptions.ConnectionError:
+                reply = "(Falha: Não foi possível conectar com Ollama local)"
+            except json.JSONDecodeError:
+                reply = "(Falha: Resposta inválida do Ollama local)"
+            except Exception as e:
+                reply = f"(Falha no Ollama: {e})"
         except Exception as e:
             reply = f"(Falha no DeepSeek: {e})"
 

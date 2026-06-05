@@ -4,7 +4,8 @@ import MetaTrader5 as mt5
 
 
 # === Chaves e Ativo ===
-FRED_API_KEY = "c37a9221da8ffd2ad23c9f964882475b"
+# FRED_API_KEY removida — não usada com Ollama local
+# FRED_API_KEY = "c37a9221da8ffd2ad23c9f964882475b"
 # DEEPSEEK_API_KEY não é mais necessária ao usar Ollama local
 # DEEPSEEK_API_KEY = "sk-..."
 ATIVO = "XAUUSD"
@@ -13,12 +14,12 @@ ATIVO = "XAUUSD"
 # Quando integrado com Ollama local/substituto, configure o endpoint e o modelo abaixo.
 # Exemplo: OLLAMA_BASE_URL = "http://109.199.107.136:11434/api/generate"
 # e OLLAMA_MODEL_NAME = "deepseek-r1:1.5b"
-OLLAMA_BASE_URL = "http://109.199.107.136:11434/api/generate"
-OLLAMA_MODEL_NAME = "deepseek-r1:1.5b"
+OLLAMA_API_BASE_URL = "http://109.199.107.136:11434/api/chat"
+OLLAMA_MODEL_NAME =  "qwen2.5:1.5b"  #"deepseek-r1:1.5b"
 
-# Mantemos as variáveis antigas apenas por compatibilidade (não utilizadas quando Ollama estiver ativo)
-DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEEPSEEK_CHAT_PATH = "/v1/chat/completions"
+# Remove DEEPSEEK_* antigos (não usados)
+# DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+# DEEPSEEK_CHAT_PATH = "/v1/chat/completions"
 
 # === Scanner / Indicadores ===
 INTERVALO_MINUTOS = 5

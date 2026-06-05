@@ -95,7 +95,7 @@ class Dashboard(tk.Tk):
         self._magic = vt_cfg.magic
 
         self.cfg_overview = {
-            "DEEPSEEK": bool(getattr(config, "DEEPSEEK_API_KEY", "")),
+            "OLLAMA": bool(getattr(config, "OLLAMA_API_BASE_URL", "")),
             "Ativo/Símbolo": vt_cfg.symbol,
             "Lote (base)": vt_cfg.lot,
             "Desvio (pts)": vt_cfg.deviation_points,
