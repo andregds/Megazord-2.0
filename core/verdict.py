@@ -10,7 +10,7 @@ class VerdictAggregator:
     """Combina sinais por timeframe usando pesos + limiar mínimo de probabilidade."""
 
     @staticmethod
-    def decidir(resultados: list, min_prob: float, pesos: dict) -> tuple[str, float, list]:
+    def decidir(resultados: List, min_prob: float, pesos: dict) -> Tuple[str, float, List]:
         """
         Retorna ('COMPRA'|'VENDA'|'AGUARDAR', score_float, lista_contribuições).
         'lista_contribuições' é [(tf, padrão, sinal, prob, peso), ...].

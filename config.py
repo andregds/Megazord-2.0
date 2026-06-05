@@ -8,7 +8,7 @@ import MetaTrader5 as mt5
 # FRED_API_KEY = "c37a9221da8ffd2ad23c9f964882475b"
 # DEEPSEEK_API_KEY não é mais necessária ao usar Ollama local
 # DEEPSEEK_API_KEY = "sk-..."
-ATIVO = "XAUUSD"
+ATIVO = "BTCUSD"
 
 # === Ollama endpoint (configurável) ===
 # Quando integrado com Ollama local/substituto, configure o endpoint e o modelo abaixo.

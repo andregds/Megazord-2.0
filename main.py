@@ -14,6 +14,7 @@ import json
 import pandas as pd
 from datetime import datetime, timedelta
 from Sincronizador_de_horario import sync_windows_time
+import sys # Importar sys
 
 from config import (
     OLLAMA_API_BASE_URL,
@@ -52,35 +53,40 @@ os.environ.setdefault("OLLAMA_MODEL_NAME", str(OLLAMA_MODEL_NAME))
 os.environ.setdefault("TELEGRAM_TOKEN", TELEGRAM_TOKEN)
 os.environ.setdefault("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID)
 
-print("🔧 Padrões buscados:", ", ".join(PatternDetector.listar_padroes()))
+print("Padroes buscados:", ", ".join(PatternDetector.listar_padroes()))
 
-# Configura o logger da aplicação
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-8s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-
+# Configura o logger da aplicação para Python 3.8
 logger = logging.getLogger("Megazord")
+logger.setLevel(logging.INFO)
+
+# Remove handlers existentes para evitar duplicação se o script for executado múltiplas vezes
+if logger.handlers:
+    for handler in logger.handlers:
+        logger.removeHandler(handler)
+
+# Cria um StreamHandler que escreve para sys.stdout
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-8s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+logger.addHandler(handler)
 
 
 def _print_deepseek_report(run_ts, params, resultados, ranking, veredito_local, deepseek_response, pending_count=None):
     """Pretty-print consolidated scanner + DeepSeek report to terminal."""
-    sep = "──────────────────────────────────────────────────────────────"
+    sep = "--------------------------------------------------------------"
     print(sep)
-    print(f"🔎 {run_ts} → Scanner Multi-Timeframe")
+    print(f"SCANNER {run_ts} - Multi-Timeframe")
     print("Params:", params)
     print(sep)
 
     # Timeframes already printed earlier in the loop; print ranking and local verdict compactly
     ranking_str = " | ".join(f"{k}: {v}" for k, v in ranking.items()) if ranking else "-"
-    print(f"📊 Ranking (sessão): {ranking_str}")
-    print(f"🧭 Veredito Local (min_prob={veredito_local.get('min_prob', '?')}): {veredito_local.get('decision','?')} | score={veredito_local.get('score', 0.0)}")
+    print(f"Ranking (sessao): {ranking_str}")
+    print(f"Veredito Local (min_prob={veredito_local.get('min_prob', '?')}): {veredito_local.get('decision','?')} | score={veredito_local.get('score', 0.0)}")
 
     # DeepSeek response summary
     print()
     if not deepseek_response:
-        print("🤖 DeepSeek Veredito Final: <nenhuma resposta>")
+        print("DeepSeek Veredito Final: <nenhuma resposta>")
         return
 
     # If we attached canonical final JSON, use it
@@ -88,18 +94,18 @@ def _print_deepseek_report(run_ts, params, resultados, ranking, veredito_local, 
     if final and isinstance(final, dict):
         print("LOGS (IA)")
         # request/response timing lines are already logged elsewhere; show final compact
-        print(f"🤖 DeepSeek — Veredito Final (compact): {json.dumps(final, ensure_ascii=False)}")
+        print(f"DeepSeek - Veredito Final (compact): {json.dumps(final, ensure_ascii=False)}")
         # also print human-friendly
-        print(f"- DECISÃO: {final.get('decision')}  |  SL: {final.get('sl')}  |  TP: {final.get('tp')}  | source: {final.get('source')}")
+        print(f"- DECISAO: {final.get('decision')}  |  SL: {final.get('sl')}  |  TP: {final.get('tp')}  | source: {final.get('source')}")
     else:
         # fallback: try to parse veredito_text
         vt = deepseek_response.get('veredito_text') if isinstance(deepseek_response, dict) else str(deepseek_response)
-        print("🤖 DeepSeek Veredito Final:")
+        print("DeepSeek Veredito Final:")
         print(vt)
 
     if pending_count is not None:
         print()
-        print(f"📝 Avaliados {pending_count} sinais pendentes.")
+        print(f"Avaliados {pending_count} sinais pendentes.")
     print(sep)
 
 
@@ -127,9 +133,9 @@ class Monitor:
         self.vt = VerdictTrader(VerdictTraderConfig())
         ok_conn = self.vt.connect()
         if ok_conn:
-            print("[VerdictTrader] ✅ Conectado ao MT5 e símbolo preparado.")
+            logger.info("Conectado ao MT5 e simbolo preparado.")
         else:
-            print("[VerdictTrader] ❌ Falha de conexão/login no MT5.")
+            logger.error("Falha de conexao/login no MT5.")
 
         # Adaptador de envio de ordens para o TraderAI
         def _ai_send_order_wrapper(trader, side, px_now, entry, sl, tp, lots=None, near_pct=0.0001):
@@ -250,15 +256,15 @@ class Monitor:
             self._sleep_until_next_5min()
 
             if not self.dentro_do_horario():
-                print("⏱️ Fora do horário operacional.")
+                logger.info("Fora do horario operacional.")
                 continue
 
             atualizados = self.tuner.avaliar_pendentes(self.mt5)
             if atualizados:
-                print(f"📝 Avaliados {atualizados} sinais pendentes.")
+                logger.info(f"Avaliados {atualizados} sinais pendentes.")
             params = self.tuner.ajustar_parametros()
 
-            print(f"\n🔎 {datetime.utcnow()} → Scanner Multi-Timeframe | Params: {params}")
+            logger.info(f"\nScanner Multi-Timeframe | Params: {params}")
             resultados = []
             processed_dfs = {}
 
@@ -294,25 +300,25 @@ class Monitor:
                     resultados.append(r)
                     self.historico_padroes.append(padrao)
 
-                    print(f"{r['Timeframe']} | {r['Padrão']} | {r['Sinal']} | Prob: {r['Probabilidade']}% | Entry:{r['Entry']} | Stop:{r['Stop']} | Target:{r['Target']}")
-                    print(f"Indicadores → RSI:{r['RSI']} | EMA:{r['EMA']} | VWAP:{r['VWAP']} | Preço:{r['Preço']} | Vol:{r['Volume']}")
+                    logger.info(f"{r['Timeframe']} | {r['Padrão']} | {r['Sinal']} | Prob: {r['Probabilidade']}% | Entry:{r['Entry']} | Stop:{r['Stop']} | Target:{r['Target']}")
+                    logger.info(f"Indicadores -> RSI:{r['RSI']} | EMA:{r['EMA']} | VWAP:{r['VWAP']} | Preco:{r['Preço']} | Vol:{r['Volume']}")
 
                     self._log_sinal(r, params, entry, stop, target, atr)
 
             if resultados:
                 ranking = pd.Series(self.historico_padroes).value_counts().to_dict()
-                print(f"\n📊 Ranking (sessão): {ranking}")
+                logger.info(f"\nRanking (sessao): {ranking}")
 
                 veredito_local, score, usados = VerdictAggregator.decidir(resultados,
                     min_prob=MIN_PROB_CONSENSO, pesos=PESOS_TIMEFRAMES
                 )
-                print(f"🧭 Veredito Local (min_prob={MIN_PROB_CONSENSO}): {veredito_local} | score={score:.1f}")
+                logger.info(f"Veredito Local (min_prob={MIN_PROB_CONSENSO}): {veredito_local} | score={score:.1f}")
 
                 usados_unique, ja_era_unico = self._unique_by_timeframe(usados)
 
                 if usados_unique:
                     for tf, pad, sig, p, w in usados_unique:
-                        print(f" - {tf}: {pad} | {sig} | {int(round(p))}% (peso {w})")
+                        logger.info(f" - {tf}: {pad} | {sig} | {int(round(p))}% (peso {w})")
 
                 self.notifier.evaluate_and_notify(
                     veredito_local=veredito_local,
@@ -321,15 +327,15 @@ class Monitor:
                     min_prob_cfg=MIN_PROB_CONSENSO,
                 )
 
-                # --- BLOQUEIO PARA NÃO CONSULTAR DEEPSEEK SE JÁ HOUVER POSIÇÃO ABERTA ---
+                # --- BLOQUEIO PARA NAO CONSULTAR DEEPSEEK SE JA HOUVER POSICAO ABERTA ---
                 self.trade_ctl.sync()  # sincroniza posições abertas no MT5
                 if self.trade_ctl.is_position_open():
-                    print("⏸️ Já existe posição aberta — DeepSeek NÃO será consultado neste ciclo.")
-                    # pula todo o restante (não monta resumo, não chama DeepSeek, não envia ordem)
+                    logger.info("Ja existe posicao aberta - DeepSeek NAO sera consultado neste ciclo.")
+                    # pula todo o restante (nao monta resumo, nao chama DeepSeek, nao envia ordem)
                     continue
                 # -------------------------------------------------------------------------
 
-                # A PARTIR DAQUI: só executa se NÃO houver posição aberta
+                # A PARTIR DAQUI: so executa se NAO houver posicao aberta
                 old_lot = float(self.vt.cfg.lot)
                 try:
                     self.vt.cfg.lot = float(self.trade_ctl.get_next_lot())
@@ -339,7 +345,7 @@ class Monitor:
                 # Build a compact resumo: send only the 2 best signals to the model to reduce context/token use.
                 # Prefer M15 and H1 if present; otherwise pick top-2 by probability. Also compute mean prob to decide
                 # whether to force a decision (no AGUARDAR).
-                resumo = "Análise técnica XAU/USD:\n"
+                resumo = "Analise tecnica XAU/USD:\n"
                 # find candidates
                 by_tf = {r['Timeframe']: r for r in resultados}
                 chosen = []
@@ -362,9 +368,9 @@ class Monitor:
 
                 for r in chosen:
                     resumo += (
-                        f"{r['Timeframe']} → {r['Padrão']} | {r['Sinal']} | "
+                        f"{r['Timeframe']} -> {r['Padrão']} | {r['Sinal']} | "
                         f"Prob:{r['Probabilidade']}% | RSI:{r['RSI']} | EMA:{r['EMA']} | "
-                        f"VWAP:{r['VWAP']} | Preço:{r['Preço']} | Entry:{r['Entry']} | "
+                        f"VWAP:{r['VWAP']} | Preco:{r['Preço']} | Entry:{r['Entry']} | "
                         f"Stop:{r['Stop']} | Target:{r['Target']}\n"
                     )
                 # compute mean probability for chosen signals
@@ -372,7 +378,7 @@ class Monitor:
                     mean_prob = sum(float(r['Probabilidade']) for r in chosen) / len(chosen)
                 except Exception:
                     mean_prob = 0.0
-                resumo += f"Parâmetros atuais: {params}\nPadrões mais frequentes: {ranking}\n"
+                resumo += f"Parametros atuais: {params}\nPadroes mais frequentes: {ranking}\n"
 
                 # --- FILTRO MULTI-TF: verifica EMA flat antes de gastar tokens/CPU ---
                 try:
@@ -382,8 +388,7 @@ class Monitor:
                         for tf_key in VERDICT_FLAT_TFS:
                             df_for_tf = processed_dfs.get(tf_key)
                             if self.vt.is_market_flat(df_for_tf, mode=VERDICT_FLAT_MODE, lookback=VERDICT_FLAT_LOOKBACK):
-                                msg = f"⏸️ Ciclo abortado: EMA está plana em {tf_key} (modo={VERDICT_FLAT_MODE}) — DeepSeek NÃO será consultado."
-                                print(msg)
+                                msg = f"Ciclo abortado: EMA esta plana em {tf_key} (modo={VERDICT_FLAT_MODE}) - DeepSeek NAO sera consultado."
                                 logger.info(msg)
                                 try:
                                     log_path = os.path.join(os.getcwd(), "Logs", "log_api.log")
@@ -393,12 +398,12 @@ class Monitor:
                                 any_flat = True
                                 break
                         if any_flat:
-                            logger.info("➡️ Ciclo atual abortado devido a filtro de EMA plana. Nenhuma decisão ou ordem será processada.")
+                            logger.info("Ciclo atual abortado devido a filtro de EMA plana. Nenhuma decisao ou ordem sera processada.")
                             continue
                 except Exception:
                     logger.debug("Falha na checagem EMA flat antes do DeepSeek")
 
-                # --- FILTRO DE PROXIMIDADE MA9: Pré-IA (economiza tokens) ---
+                # --- FILTRO DE PROXIMIDADE MA9: Pre-IA (economiza tokens) ---
                 try:
                     from config import VERDICT_PROXIMITY_FILTER_ENABLE
                     if VERDICT_PROXIMITY_FILTER_ENABLE:
@@ -406,28 +411,27 @@ class Monitor:
                         if df_m15 is not None and len(df_m15) > 0:
                             preco_atual = float(df_m15["close"].iloc[-1])
                             if not self.vt.is_price_within_proximity(df_m15, preco_atual):
-                                msg = (f"⏸️ [FILTRO PROXIMIDADE] Ciclo Pré-IA abortado em M15: "
-                                       f"Preço atual ({preco_atual:.2f}) distante da EMA9. DeepSeek poupado.")
-                                print(msg)
+                                msg = (f"[FILTRO PROXIMIDADE] Ciclo Pre-IA abortado em M15: "
+                                       f"Preco atual ({preco_atual:.2f}) distante da EMA9. DeepSeek poupado.")
                                 logger.info(msg)
                                 try:
                                     log_path = os.path.join(os.getcwd(), "Logs", "log_api.log")
                                     self.deepseek._rotate_and_append(log_path, f"PRECHECK_ABORT: {msg}\n")
                                 except Exception:
                                     pass
-                                logger.info("➡️ Ciclo atual abortado devido a filtro de proximidade. Nenhuma decisão ou ordem será processada.")
+                                logger.info("Ciclo atual abortado devido a filtro de proximidade. Nenhuma decisao ou ordem sera processada.")
                                 continue
                 except Exception:
-                    logger.debug("Falha na checagem de proximidade pré-IA")
+                    logger.debug("Falha na checagem de proximidade pre-IA")
 
-                # Decisão final: pode ser 'local', 'deepseek' ou 'hybrid' (configurado em config.VERDICT_FINAL_SOURCE)
+                # Decisao final: pode ser 'local', 'deepseek' ou 'hybrid' (configurado em config.VERDICT_FINAL_SOURCE)
                 side_to_trade = None
                 sl = 0.0
                 tp = 0.0
 
                 if VERDICT_FINAL_SOURCE == "local":
-                    # Não chama a IA — segue veredito local
-                    print("ℹ️ VERDICT_FINAL_SOURCE=local -> seguindo veredito local sem consultar DeepSeek.")
+                    # Nao chama a IA - segue veredito local
+                    logger.info("VERDICT_FINAL_SOURCE=local -> seguindo veredito local sem consultar DeepSeek.")
                     if "COMPRA" in veredito_local.upper():
                         side_to_trade = "BUY"
                     elif "VENDA" in veredito_local.upper():
@@ -461,10 +465,10 @@ class Monitor:
                     deepseek_response = self.deepseek.analisar_trade(resumo, timeout=4.5, decision_required=decision_required)
 
                     if "error" in deepseek_response:
-                        print(f"\n🤖 DeepSeek ERRO → {deepseek_response['error']}")
+                        logger.error(f"DeepSeek ERRO -> {deepseek_response['error']}")
                         if VERDICT_FINAL_SOURCE == "hybrid":
                             # fallback para veredito local (comportamento legacy)
-                            print(f"Fallback (veredito local) → {veredito_local}")
+                            logger.info(f"Fallback (veredito local) -> {veredito_local}")
                             if "COMPRA" in veredito_local.upper():
                                 side_to_trade = "BUY"
                             elif "VENDA" in veredito_local.upper():
@@ -483,10 +487,10 @@ class Monitor:
                                     candidate = resultados[0]
                                 sl = candidate.get("Stop", 0.0)
                                 tp = candidate.get("Target", 0.0)
-                            logger.info(f"Motivo da decisão (Fallback): {veredito_local}")
+                            logger.info(f"Motivo da decisao (Fallback): {veredito_local}")
                         else:
-                            # modo 'deepseek' exige resposta da IA — sem fallback
-                            print("⚠️ VERDICT_FINAL_SOURCE=deepseek -> sem fallback. Nenhuma ação será tomada.")
+                            # modo 'deepseek' exige resposta da IA - sem fallback
+                            logger.warning("VERDICT_FINAL_SOURCE=deepseek -> sem fallback. Nenhuma acao sera tomada.")
                             side_to_trade = None
 
                     else:
@@ -495,59 +499,59 @@ class Monitor:
                             _print_deepseek_report(datetime.utcnow(), params, resultados, ranking if 'ranking' in locals() else {}, {"min_prob": MIN_PROB_CONSENSO, "decision": veredito_local, "score": score}, deepseek_response, pending_count=atualizados if atualizados else None)
                         except Exception:
                             # fallback to previous behavior
-                            print(f"\n🤖 DeepSeek Veredito Final: {deepseek_response.get('veredito_text', '<sem texto>')}")
+                            logger.info(f"DeepSeek Veredito Final: {deepseek_response.get('veredito_text', '<sem texto>')}")
                         if deepseek_response.get('decision') == "COMPRA":
                             side_to_trade = "BUY"
                         elif deepseek_response.get('decision') == "VENDA":
                             side_to_trade = "SELL"
                         sl = deepseek_response.get('sl', 0.0)
                         tp = deepseek_response.get('tp', 0.0)
-                        logger.info("Motivo da decisão do DeepSeek: %s", deepseek_response.get('reason'))
+                        logger.info("Motivo da decisao do DeepSeek: %s", deepseek_response.get('reason'))
 
                 if side_to_trade:
-                    # Checagem FINAL de segurança (caso algo tenha aberto posição entre a análise e o envio)
+                    # Checagem FINAL de seguranca (caso algo tenha aberto posicao entre a analise e o envio)
                     if self.trade_ctl.is_position_open():
-                        print("⏸️ Já existe posição aberta — decisão DeepSeek ignorada (bloqueio final).")
+                        logger.info("Ja existe posicao aberta - decisao DeepSeek ignorada (bloqueio final).")
                     else:
-                        # no seu código original o método ainda é _get_current_price
+                        # no seu codigo original o metodo ainda e _get_current_price
                         price_now = self.vt._get_current_price(side_to_trade)
                         if price_now is None:
-                            print("⚠️ Não foi possível obter preço atual – ordem não enviada.")
+                            logger.warning("Nao foi possivel obter preco atual - ordem nao enviada.")
                         else:
                             order_res = self.vt._order_send_market(side_to_trade, price_now, sl, tp)
                             if order_res and order_res.get("ok"):
-                                print(f"✅ Ordem {side_to_trade} enviada por decisão {'DeepSeek' if VERDICT_FINAL_SOURCE != 'local' else 'Local'}:") # Adjusted log message
-                                print(f"    preço  = {price_now:.5f}")
-                                print(f"    SL     = {sl:.5f}")
-                                print(f"    TP     = {tp:.5f}")
-                                print(
+                                logger.info(f"Ordem {side_to_trade} enviada por decisao {'DeepSeek' if VERDICT_FINAL_SOURCE != 'local' else 'Local'}:")
+                                logger.info(f"    preco  = {price_now:.5f}")
+                                logger.info(f"    SL     = {sl:.5f}")
+                                logger.info(f"    TP     = {tp:.5f}")
+                                logger.info(
                                     "    ticket = "
                                     f"{order_res.get('result').order if order_res.get('result') else 'N/A'}"
                                 )
                             else:
-                                print(f"❌ Falha ao enviar ordem {side_to_trade} por decisão {'DeepSeek' if VERDICT_FINAL_SOURCE != 'local' else 'Local'}:") # Adjusted log message
-                                print(f"    detalhe = {order_res}")
+                                logger.error(f"Falha ao enviar ordem {side_to_trade} por decisao {'DeepSeek' if VERDICT_FINAL_SOURCE != 'local' else 'Local'}:")
+                                logger.error(f"    detalhe = {order_res}")
                 else:
-                    # Evita referenciar `deepseek_response` quando não foi definido (modo 'local')
+                    # Evita referenciar `deepseek_response` quando nao foi definido (modo 'local')
                     if VERDICT_FINAL_SOURCE == "local":
-                        print(f"\nℹ️ Veredito final (local) sem ação: {veredito_local}")
+                        logger.info(f"\nVeredito final (local) sem acao: {veredito_local}")
                     else:
-                        # Se estiver no modo 'deepseek' ou 'hybrid', tente mostrar a resposta da IA se disponível
+                        # Se estiver no modo 'deepseek' ou 'hybrid', tente mostrar a resposta da IA se disponivel
                         if 'deepseek_response' in locals() and isinstance(deepseek_response, dict):
-                            print(f"\n🤖 DeepSeek Veredito Final (sem ação): {deepseek_response.get('veredito_text', '<sem texto>')}")
+                            logger.info(f"\nDeepSeek Veredito Final (sem acao): {deepseek_response.get('veredito_text', '<sem texto>')}")
                         else:
-                            print("\n🤖 DeepSeek Veredito Final (sem ação): <nenhuma resposta DeepSeek disponível>")
+                            logger.info("\nDeepSeek Veredito Final (sem acao): <nenhuma resposta DeepSeek disponivel>")
             else:
-                print("Nenhum padrão detectado.")
+                logger.info("Nenhum padrao detectado.")
 
 
 if __name__ == "__main__":
     M = Monitor()
 
     # -------------------------------------------------
-    #  NÃO CHAMA O TRADERAI – evita a mensagem “Não há pergunta clara”
+    #  NAO CHAMA O TRADERAI - evita a mensagem "Nao ha pergunta clara"
     # -------------------------------------------------
-    # resp = M.AI.chat("Qual é a resposta ? ?.")
-    # print("🤖 Qual a sua atuação aqui ?:", resp.get("reply") if isinstance(resp, dict) else resp)
+    # resp = M.AI.chat("Qual e a resposta ? ?.")
+    # print("Qual a sua atuacao aqui ?:", resp.get("reply") if isinstance(resp, dict) else resp)
 
     M.rodar()

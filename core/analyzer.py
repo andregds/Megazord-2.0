@@ -9,6 +9,8 @@ Uso:
 import numpy as np
 import pandas as pd
 from datetime import datetime
+from typing import Tuple # Adicione esta linha
+typing import Tuple, Optional # Adicione Optional aqui
 from config import (
     RSI_SOBRECOMPRA, RSI_SOBREVENDIDO, ATR_MULT_STOP, RR_MULT,
     EVAL_BARS, TIMEFRAMES
@@ -20,7 +22,7 @@ class Analyzer:
     @staticmethod
     def calcular_probabilidade(df: pd.DataFrame, padrao: str,
                                rsi_buy: float = RSI_SOBREVENDIDO,
-                               rsi_sell: float = RSI_SOBRECOMPRA) -> tuple[int, str]:
+                               rsi_sell: float = RSI_SOBRECOMPRA) -> Tuple[int, str]:
         """Retorna (score %, sinal 'COMPRA'/'VENDA') usando filtros (RSI/EMA/VWAP/Volume)."""
         rsi   = df["RSI"].iloc[-1]
         ema   = df["EMA"].iloc[-1]
@@ -48,7 +50,7 @@ class Analyzer:
     @staticmethod
     def montar_trade_levels(df: pd.DataFrame, sinal: str,
                             atr_mult: float = ATR_MULT_STOP,
-                            rr: float = RR_MULT) -> tuple[float, float, float, float]:
+                            rr: float = RR_MULT) -> Tuple[float, float, float, float]:
         """Calcula entry/stop/target com base no ATR; retorna (entry, stop, target, atr)."""
         entry = float(df["close"].iloc[-1])
         atr   = float(df["ATR"].iloc[-1])
@@ -67,7 +69,7 @@ class Analyzer:
     @staticmethod
     def avaliar_trade(mt5c, timeframe_name: str, detect_time: datetime,
                       entry: float, stop: float, target: float,
-                      eval_bars: int = EVAL_BARS) -> tuple[str, datetime | None]:
+                      eval_bars: int = EVAL_BARS) -> Tuple[str, Optional[datetime]]: # Altere aqui
         """Percorre os próximos N candles; retorna ('GAIN'/'LOSS'/'PENDING', datetime_ocorrencia)."""
         tf = TIMEFRAMES[timeframe_name]
         df_fw = mt5c.obter_candles_desde(tf, detect_time, eval_bars + 2)
@@ -94,7 +96,7 @@ class Analyzer:
             padrao: str,
             rsi_buy: float = RSI_SOBREVENDIDO,
             rsi_sell: float = RSI_SOBRECOMPRA,
-    ) -> tuple[int, str]:
+    ) -> T    ) -> Tuple[int, str]: # Altere aqui
         """
         Pontua qualquer padrão suportado com filtros de contexto (EMA/VWAP/RSI/Volume).
         Double Bottom/Top reutilizam a regra original (compatível com versões anteriores).

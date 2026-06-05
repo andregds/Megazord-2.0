@@ -14,7 +14,7 @@ class TraderAI:
                  trader: Any,
                  send_order_fn: Callable[..., Any],
                  sanitize_fn: Optional[Callable[..., Any]] = None,
-                 symbol: str = "XAUUSD",
+                 symbol: str = "BTCUSD",
                  default_near_pct: float = 0.0001,
                  default_invert_flag: int = 0):
         self.trader = trader

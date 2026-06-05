@@ -27,7 +27,7 @@ Side = Literal["BUY", "SELL"]
 @dataclass
 class VerdictTraderConfig:
     # Símbolo e execução
-    symbol: str = os.getenv("VERDICT_SYMBOL", "XAUUSD")
+    symbol: str = os.getenv("VERDICT_SYMBOL", "BTCUSD")
     lot: float = float(os.getenv("VERDICT_LOT", "0.02"))
     deviation_points: int = int(os.getenv("VERDICT_DEVIATION_PTS", "60"))
     magic: int = int(os.getenv("VERDICT_MAGIC", "880031"))
@@ -68,9 +68,9 @@ class VerdictTrader:
                 logger.error(f"Falha ao conectar à conta MT5 {login} no servidor {mt5_server}: {mt5.last_error()}")
                 mt5.shutdown()
                 return False
-            logger.info(f"✅ Conectado ao MetaTrader5 na conta {login}.")
+            logger.info(f"Conectado ao MetaTrader5 na conta {login}.")
         else:
-            logger.info("✅ MetaTrader5 inicializado (sem login explícito, usando conta padrão).")
+            logger.info("MetaTrader5 inicializado (sem login explícito, usando conta padrão).")
         # Obter informações do símbolo
         self.symbol_info = mt5.symbol_info(self.cfg.symbol)
         if self.symbol_info is None:
@@ -83,7 +83,7 @@ class VerdictTrader:
                 mt5.shutdown()
                 return False
         self.point = self.symbol_info.point
-        logger.info(f"✅ Símbolo {self.cfg.symbol} selecionado e informações obtidas. Point: {self.point}")
+        logger.info(f"Símbolo {self.cfg.symbol} selecionado e informações obtidas. Point: {self.point}")
         self.mt5_connected = True
         return True
 
